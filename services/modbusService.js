@@ -1,726 +1,291 @@
-import BleManager from 'react-native-ble-manager';
-
+import { Buffer } from 'buffer';
 import {
-    buildModbusMessage,
-
-    COMMANDS,
-
-    REGISTERS,
-
-    splitInt32
+  buildModbusMessage,
+  COMMANDS,
+  REGISTERS,
+  stringToRegisters
 } from './modbusUtils';
 
-
-
 class ModbusService {
-
   constructor() {
-
-    this.slaveId = 1; // Varsayılan slave ID
-
+    this.slaveId = 1;
     this.serviceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-
     this.characteristicUUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-
     this.deviceId = null;
-
-    this.responseTimeout = 5000; // 5 saniye
-
+    this.device = null;
+    this.queue = [];
+    this.processing = false;
+    this.isRebooting = false;
+    this.onDataCallback = null; // UI için global dinleyici
+    this.readResolver = null;   // Bekleyen okuma işlemi için resolver
+    this.subscription = null;
   }
 
-
-
-  setDevice(deviceId, slaveId = 1) {
-
+  setDevice(deviceId, device, slaveId = 1) {
     this.deviceId = deviceId;
-
+    this.device = device;
     this.slaveId = slaveId;
 
+    if (device) {
+      this.setupMonitor();
+    }
   }
 
-
-
-  // Modbus Komutu Gönder ve Yanıt Al
-
-  async sendCommand(functionCode, startAddress, quantity = null, values = null) {
-
-    if (!this.deviceId) {
-
-      throw new Error('Cihaz seçilmedi');
-
+  setupMonitor() {
+    if (this.subscription) {
+      this.subscription.remove();
     }
 
-
-
-    try {
-
-      const request = buildModbusMessage(
-
-        this.slaveId,
-
-        functionCode,
-
-        startAddress,
-
-        quantity,
-
-        values
-
-      );
-
-
-
-      // Request'i array'e çevir (BLE yazma için)
-
-      const requestArray = Array.from(request);
-
-
-
-      console.log(`📤 Modbus Gönderiliyor (Adres: ${startAddress}):`, requestArray);
-
-
-
-      // BLE cihazına yaz
-
-      await BleManager.write(
-
-        this.deviceId,
-
-        this.serviceUUID,
-
-        this.characteristicUUID,
-
-        requestArray
-
-      );
-
-
-
-      console.log(`✓ Komut gönderildi (Adres: ${startAddress})`);
-
-
-
-      // NOT: Yanıt notification ile gelecek, burada okumaya gerek yok
-
-      // Aksi halde sonsuz notification döngüsüne girebiliriz
-
-     
-
-      // Basit yanıt objesi döndür
-
-      return { success: true, address: startAddress };
-
-     
-
-    } catch (error) {
-
-      console.error('❌ Modbus Hatası:', error.message);
-
-      throw error;
-
-    }
-
+    this.subscription = this.device.monitorCharacteristicForService(
+      this.serviceUUID,
+      this.characteristicUUID,
+      (error, characteristic) => {
+        if (error) {
+          console.log("📡 Modbus Monitor Hatası:", error.message);
+          return;
+        }
+        if (characteristic?.value) {
+          const data = Buffer.from(characteristic.value, 'base64');
+          this.handleIncomingData(Array.from(data));
+        }
+      },
+      `modbus_monitor_${this.deviceId}`
+    );
   }
 
+  handleIncomingData(data) {
+    // 1. Bekleyen bir readRegister (FC 3) varsa onu çöz
+    if (this.readResolver && data[1] === 3) {
+      const resolver = this.readResolver;
+      this.readResolver = null;
 
+      // Registers'ları ayıkla
+      const byteCount = data[2];
+      const registers = [];
+      for (let i = 0; i < byteCount; i += 2) {
+        registers.push((data[3 + i] << 8) | data[4 + i]);
+      }
+      resolver({ success: true, registers });
+    }
 
-  // Register Oku (Tek Seferlik Notification ile)
+    // 2. Global dinleyiciye (Details ekranı gibi) haber ver
+    if (this.onDataCallback) {
+      this.onDataCallback(data);
+    }
+  }
 
-  async readRegister(address, count = 1) {
+  async sendCommand(functionCode, startAddress, quantity = null, values = null, withoutResponse = false) {
+    if (this.isRebooting) {
+      console.log("⚠️ Reboot işlemi devam ediyor, komut reddedildi.");
+      return Promise.reject(new Error("Cihaz yeniden başlatılıyor..."));
+    }
 
-    console.log(`📖 Okuma başlıyor (Adres: ${address}, Adet: ${count})`);
+    return new Promise((resolve, reject) => {
+      this.queue.push({ functionCode, startAddress, quantity, values, withoutResponse, resolve, reject });
+      this.processQueue();
+    });
+  }
 
-   
+  async processQueue() {
+    if (this.processing || this.queue.length === 0) return;
+
+    this.processing = true;
+    const { functionCode, startAddress, quantity, values, withoutResponse, resolve, reject } = this.queue.shift();
 
     try {
-
-      // 1. Notification'ı geçici olarak aç
-
-      await BleManager.startNotification(
-
-        this.deviceId,
-
-        this.serviceUUID,
-
-        this.characteristicUUID
-
-      );
-
-      console.log('✓ Notification geçici olarak açıldı');
-
-     
-
-      // 2. Okuma komutunu gönder
-
-      await this.sendCommand(3, address, count);
-
-     
-
-      // 3. Yanıtın gelmesi için bekle (500ms)
-
-      console.log('⏳ Yanıt bekleniyor...');
-
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      console.log(resolve)
-
-     
-
-      // 4. Notification'ı hemen kapat
-
-      await BleManager.stopNotification(
-
-        this.deviceId,
-
-        this.serviceUUID,
-
-        this.characteristicUUID
-
-      );
-
-      console.log('✓ Notification kapatıldı');
-
-     
-
-      // NOT: Gerçek veri notification handler'da parse edilmeli
-
-      // Şimdilik sadece komutun gönderildiğini belirtelim
-
-      return { success: true, address: address };
-
-     
-
-    } catch (error) {
-
-      console.error('❌ Okuma hatası:', error);
-
-      // Hata durumunda notification'ı kapatmayı dene
-
-      try {
-
-        await BleManager.stopNotification(
-
-          this.deviceId,
-
-          this.serviceUUID,
-
-          this.characteristicUUID
-
-        );
-
-      } catch (e) {
-
-        console.log('Notification zaten kapalıydı');
-
+      if (!this.device || !this.device.id) {
+        throw new Error('Cihaz bağlı değil');
       }
 
-      throw error;
+      const request = buildModbusMessage(
+        this.slaveId,
+        functionCode,
+        startAddress,
+        quantity,
+        values
+      );
 
+      const base64Data = Buffer.from(request).toString('base64');
+
+      if (withoutResponse) {
+        await this.device.writeCharacteristicWithoutResponseForService(
+          this.serviceUUID,
+          this.characteristicUUID,
+          base64Data
+        );
+      } else {
+        await this.device.writeCharacteristicWithResponseForService(
+          this.serviceUUID,
+          this.characteristicUUID,
+          base64Data
+        );
+      }
+
+      // Eğer bu bir OKUMA (FC 3) ise, response gelene kadar bekle (max 1sn)
+      if (functionCode === 3) {
+        const result = await new Promise((res) => {
+          this.readResolver = res;
+          setTimeout(() => {
+            if (this.readResolver === res) {
+              this.readResolver = null;
+              res({ success: false, error: 'Timeout' });
+            }
+          }, 1000);
+        });
+        resolve(result);
+      } else {
+        // UI'ın nefes alması için çok kısa bir bekleme
+        await new Promise(r => setTimeout(r, 50));
+        resolve({ success: true, address: startAddress });
+      }
+    } catch (error) {
+      if (this.isRebooting || error.message?.includes("disconnected") || error.message?.includes("not connected")) {
+        console.log("📡 Beklenen BLE hatası (Reboot/Bağlantı Kesik):", error.message);
+        resolve({ success: false, error: error.message });
+      } else {
+        console.error('❌ Modbus Hatası:', error.message);
+        reject(error);
+      }
+    } finally {
+      this.processing = false;
+      this.processQueue();
+    }
+  }
+
+  async safeTeardown(isManual = true) {
+    console.log(`🧹 Merkezi güvenli kapatma başlatıldı... (isManual: ${isManual})`);
+    const wasRebooting = this.isRebooting;
+
+    this.queue = [];
+    this.processing = false;
+    this.onDataCallback = null;
+    this.readResolver = null;
+
+    if (this.subscription) {
+      this.subscription.remove();
+      this.subscription = null;
     }
 
+    if (this.device) {
+      const dev = this.device;
+      this.device = null;
+
+      if (wasRebooting || !isManual) {
+        console.log("⏭️ Fiziksel bağlantı kesme işlemi pasif olarak atlanıyor.");
+        this.isRebooting = false;
+        return;
+      }
+
+      try {
+        await dev.cancelConnection();
+        console.log("✓ Cihaz bağlantısı merkezden kesildi.");
+      } catch (e) { }
+    }
+
+    this.isRebooting = false;
   }
 
 
 
-  // Register Yaz (Tek)
+  //tekli okuma - tekli yazma - birden fazla yazma
+  async readRegister(address, count = 1) {
+    return this.sendCommand(3, address, count);
+  }
 
   async writeRegister(address, value) {
-
     return this.sendCommand(6, address, null, [value]);
-
   }
-
-
-
-  // Register Yaz (Çoklu)
 
   async writeRegisters(address, values) {
-
     return this.sendCommand(16, address, null, values);
-
   }
 
 
 
-  // --- KOMUT FONKSİYONLARI ---
 
-
-
-  // Sıfırlama Komutu
-
-  async zero() {
-
-    console.log('🔄 Sıfırlama komutu gönderiliyor...');
-
-    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.ZERO);
-
-  }
-
-
-
-  // Dara Komutu (Tare)
-
-  async tare() {
-
-    console.log('⚙️ Dara komutu gönderiliyor...');
-
-    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.TARE);
-
-  }
-
-
-
-  // Yeniden Başlat
-
-  async restart() {
-
-    console.log('🔁 Cihaz yeniden başlatılıyor...');
-
-    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.RESTART);
-
-  }
-
-
-
-  // Fabrika Ayarlarına Dön
-
-  async factoryReset() {
-
-    console.log('⚠️ Fabrika ayarlarına dönüyor...');
-
-    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.FACTORY_RESET);
-
-  }
-
-
-
-  // --- KALIBRASYON FONKSİYONLARI ---
-
-
-
-  // Sıfır Kalibrasyonu
-
-  async calibrationZero() {
-
-    console.log('🎯 Sıfır kalibrasyonu başlanıyor (yüksüz)...');
-
-    // Adım 1: Kalibrasyon komutu gönder
-
-    const response = await this.writeRegister(REGISTERS.CALIBRATION_CMD, 2);
-
-    console.log('✓ Sıfır kalibrasyonu başladı, lütfen ~10 saniye bekleyiniz');
-
-    return response;
-
-  }
-
-
-
-  // Yük Kalibrasyonu
-
-  async calibrationLoad(weight) {
-
-    console.log(`🎯 Yük kalibrasyonu başlanıyor (${weight}kg)...`);
-
-    try {
-
-      // Adım 1: Kalibrasyon ağırlığını yaz (x1000)
-
-      const calibValue = Math.round(weight * 1000);
-
-      await this.writeRegister(REGISTERS.CALIBRATION_VALUE, calibValue);
-
-     
-
-      // Adım 2: Kalibrasyon komutunu gönder (3 = Yük)
-
-      const response = await this.writeRegister(REGISTERS.CALIBRATION_CMD, 3);
-
-      console.log('✓ Yük kalibrasyonu başladı, lütfen ~10 saniye bekleyiniz');
-
-      return response;
-
-    } catch (error) {
-
-      console.error('❌ Yük kalibrasyonu başarısız:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // Dijital Kalibrasyon
-
-  async calibrationDigital(maxCapacity, mvPerVolt) {
-
-    console.log('🎯 Dijital kalibrasyon başlanıyor...');
-
-    try {
-
-      // Adım 1: Maksimum kapasite (x1000)
-
-      const capValue = Math.round(maxCapacity * 1000);
-
-      const [capHigh, capLow] = splitInt32(capValue);
-
-      await this.writeRegisters(REGISTERS.MAX_CAPACITY, [capHigh, capLow]);
-
-
-
-      // Adım 2: mV/V değeri (x100000)
-
-      const mvValue = Math.round(mvPerVolt * 100000);
-
-      const [mvHigh, mvLow] = splitInt32(mvValue);
-
-      await this.writeRegisters(REGISTERS.DIGITAL_CALIB_MV_V, [mvHigh, mvLow]);
-
-
-
-      // Adım 3: Kalibrasyon komutunu gönder (4 = Dijital Dara, 5 = Dijital Ağırlık)
-
-      const response = await this.writeRegister(REGISTERS.CALIBRATION_CMD, 4);
-
-      console.log('✓ Dijital kalibrasyon başladı, lütfen ~10 saniye bekleyiniz');
-
-      return response;
-
-    } catch (error) {
-
-      console.error('❌ Dijital kalibrasyon başarısız:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // --- DURUMU OKUMA FONKSİYONLARI ---
-
-
-
-  // Durum Bilgisi Oku
-
-  async readStatus() {
-
-    try {
-
-      console.log('⚠️ Durum okuma: Komut gönderildi, yanıt notification ile gelecek');
-
-      await this.readRegister(REGISTERS.STATUS);
-
-     
-
-      // Geçici: Notification handler'da parse edilmeli
-
-      // Şimdilik basit bir yanıt dönelim
-
-      return {
-
-        value: 0,
-
-        messages: ['Komut gönderildi, cihazdan yanıt bekleniyor'],
-
-        isOverweight: false,
-
-        isStable: true,
-
-        canZero: true,
-
-        canTare: true,
-
-        hasTare: false,
-
-        relay1On: false,
-
-        relay2On: false
-
-      };
-
-    } catch (error) {
-
-      console.error('❌ Durum okunamadı:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // Tüm Ağırlık Değerlerini Oku
-
-  async readWeightValues() {
-
-    try {
-
-      console.log('⚠️ Ağırlık okuma: Komut gönderildi');
-
-      await this.readRegister(REGISTERS.DISPLAY_VALUE, 6);
-
-      return {
-
-        displayValue: 0,
-
-        tareValue: 0,
-
-        grossValue: 0,
-
-        unit: 'kg'
-
-      };
-
-    } catch (error) {
-
-      console.error('❌ Ağırlık değerleri okunamadı:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // Ekran Değerini Oku
-
-  async readDisplayValue() {
-
-    try {
-
-      console.log('⚠️ Ekran değeri okuma: Komut gönderildi');
-
-      await this.readRegister(REGISTERS.DISPLAY_VALUE);
-
-      return 0;
-
-    } catch (error) {
-
-      console.error('❌ Ekran değeri okunamadı:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // --- YAPILANDIRMA FONKSİYONLARI ---
-
-
-
-  // İletişim Modunu Ayarla
-
-  async setCommMode(mode) {
-
-    // 0: Kapalı, 1: Sürekli, 2: Modbus
-
-    console.log(`📡 İletişim modu ayarlanıyor: ${mode}`);
-
-    return this.writeRegister(REGISTERS.COMM_MODE, mode);
-
-  }
-
-
-
-  // İletişim ID'si Ayarla
-
-  async setCommId(id) {
-
-    console.log(`📡 İletişim ID ayarlanıyor: ${id}`);
-
-    return this.writeRegister(REGISTERS.COMM_ID, id);
-
-  }
-
-
-
-  // Baud Rate Ayarla
-
-  async setBaudrate(baudRateCode) {
-
-    // 0:1200, 1:2400, 2:4800, 3:9600, 4:19200, 5:38400, 6:57600, 7:115200
-
-    console.log(`📡 Baud rate ayarlanıyor: ${baudRateCode}`);
-
-    return this.writeRegister(REGISTERS.BAUDRATE, baudRateCode);
-
-  }
-
-
-
-  // Birim Ayarla
-
-  async setUnit(unitCode) {
-
-    // 0: kg, 1: g, 2: lb, 3: mV/V, 4: mV
-
-    console.log(`⚙️ Birim ayarlanıyor: ${unitCode}`);
-
-    return this.writeRegister(REGISTERS.UNIT, unitCode);
-
-  }
-
-
-
-  // Filtre Türü Ayarla
-
-  async setFilterType(filterType) {
-
-    // 0: Kapalı, 1: Özel, 2: Hareketli Ortalama
-
-    console.log(`🔧 Filtre türü ayarlanıyor: ${filterType}`);
-
-    return this.writeRegister(REGISTERS.FILTER_TYPE, filterType);
-
-  }
-
-
-
-  // ADC Hz Ayarla
-
-  async setAdcHz(hz) {
-
-    // 0:6Hz, 1:12Hz, 2:25Hz, 3:50Hz, 4:100Hz, 5:200Hz, 6:400Hz
-
-    console.log(`📊 ADC Hz ayarlanıyor: ${hz}`);
-
-    return this.writeRegister(REGISTERS.ADC_HZ, hz);
-
-  }
-
-
-
-  // Dil Ayarla
-
-  async setLanguage(language) {
-
-    // 0: İngilizce, 1: Türkçe
-
-    console.log(`🌐 Dil ayarlanıyor: ${language}`);
-
-    return this.writeRegister(REGISTERS.LANGUAGE, language);
-
-  }
-
-
-
-  // Röle Ayarları
-
-  async setRelayControl(relayNum, controlType) {
-
-    // relayNum: 1 veya 2
-
-    // controlType: 0 (Modbus) veya 1 (TR-4 Parametreleri)
-
-    const address = relayNum === 1 ? REGISTERS.RELAY1_CONTROL : 82;
-
-    console.log(`🔌 Röle ${relayNum} kontrol tipi ayarlanıyor: ${controlType}`);
-
-    return this.writeRegister(address, controlType);
-
-  }
-
-
-
-  async setRelayValue(relayNum, setPoint) {
-
-    // setPoint: x1000
-
-    const address = relayNum === 1 ? REGISTERS.RELAY1_SET : 83;
-
-    const value = Math.round(setPoint * 1000);
-
-    const [high, low] = splitInt32(value);
-
-    console.log(`🔌 Röle ${relayNum} set değeri ayarlanıyor: ${setPoint}kg`);
-
-    return this.writeRegisters(address, [high, low]);
-
-  }
-
-
-
-  // ADC Ham Değeri Oku
-
-  async readRawADC() {
-
-    try {
-
-      console.log('⚠️ ADC okuma: Komut gönderildi');
-
-      await this.readRegister(REGISTERS.ADC_RAW);
-
-      return 0;
-
-    } catch (error) {
-
-      console.error('❌ ADC değeri okunamadı:', error);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  // Seri Numarası Oku
-
+  // --- DEVICE INFO ---
   async readSerialNumber() {
-
-    try {
-
-      console.log('⚠️ Seri numarası okuma: Komut gönderildi');
-
-      await this.readRegister(REGISTERS.SERIAL_NUMBER);
-
-      return 'N/A';
-
-    } catch (error) {
-
-      console.error('❌ Seri numarası okunamadı:', error);
-
-      throw error;
-
-    }
-
+    return this.readRegister(128, 2);
   }
-
-
-
-  // Yazılım Sürümü Oku
 
   async readFirmwareVersion() {
-
-    try {
-
-      console.log('⚠️ Firmware okuma: Komut gönderildi');
-
-      await this.readRegister(REGISTERS.FIRMWARE_VERSION);
-
-      return 100; // Varsayılan v1.00
-
-    } catch (error) {
-
-      console.error('❌ Yazılım sürümü okunamadı:', error);
-
-      throw error;
-
-    }
-
+    return this.readRegister(130, 1);
   }
 
+  // --- CALIBRATION ---
+  async calibrationZero() {
+    // Manuel: 106 adresine "2" değeri yazılır
+    return this.writeRegister(106, 2);
+  }
+
+  async calibrationLoad(weight) {
+    // Manuel: 99 adresine ağırlık değerinin 1000 katı yazılır
+    const w = Math.round(weight * 1000);
+    const high = (w >> 16) & 0xFFFF;
+    const low = w & 0xFFFF;
+    await this.writeRegisters(99, [high, low]);
+    // Manuel: 106 adresine "3" değeri yazılır
+    return this.writeRegister(106, 3);
+  }
+
+  async calibrationDigital(maxCapacity, value, mvvValue) {
+    // 1. Kapasite (R113 - 32 Bit)
+    const cap = Math.round(parseFloat(maxCapacity) * 1000);
+    const capHigh = (cap >> 16) & 0xFFFF;
+    const capLow = cap & 0xFFFF;
+    await this.writeRegisters(113, [capHigh, capLow]);
+
+    // 2. Ağırlık/Dara Değeri (R99 - 32 Bit)
+    const val = Math.round(parseFloat(value) * 1000);
+    const valHigh = (val >> 16) & 0xFFFF;
+    const valLow = val & 0xFFFF;
+    await this.writeRegisters(99, [valHigh, valLow]);
+
+    // 3. mV/V Değeri (R103 - 32 Bit)
+    const mvvInt = Math.round(parseFloat(mvvValue) * 100000);
+    const mvvHigh = (mvvInt >> 16) & 0xFFFF;
+    const mvvLow = mvvInt & 0xFFFF;
+    await this.writeRegisters(103, [mvvHigh, mvvLow]);
+
+    // 4. Komut (R106 = 4)
+    return this.writeRegister(106, 4);
+  }
+
+  // --- STATUS & COMMANDS ---
+  async readStatus() {
+    await this.readRegister(7, 1);
+    return { success: true, messages: ["Durum okundu"], canTare: true, hasTare: false };
+  }
+
+  async zero() {
+    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.ZERO);
+  }
+
+  async tare() {
+    return this.writeRegister(REGISTERS.COMMAND, COMMANDS.TARE);
+  }
+
+  async restart() {
+    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.RESTART], true);
+    this.isRebooting = true;
+    return result;
+  }
+
+  async writeWiFiSSID(ssid) {
+    const registers = stringToRegisters(ssid, 12);
+    return this.writeRegisters(50, registers);
+  }
+
+  async writeWiFiPassword(password) {
+    const registers = stringToRegisters(password, 12);
+    return this.writeRegisters(62, registers);
+  }
+
+  async factoryReset() {
+    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.FACTORY_RESET], true);
+    this.isRebooting = true;
+    return result;
+  }
 }
 
-
-
 export default new ModbusService();
-

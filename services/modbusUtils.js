@@ -231,9 +231,38 @@ export const splitInt32 = (value) => {
 
 
 export const combineInt32 = (high, low) => {
-
   return ((high << 16) | low) >>> 0;
+};
 
+// String to UInt16 Array (Modbus Registers)
+export const stringToRegisters = (str, registerCount) => {
+  const registers = new Array(registerCount).fill(0);
+  for (let i = 0; i < str.length && i < registerCount * 2; i++) {
+    const charCode = str.charCodeAt(i);
+    const registerIndex = Math.floor(i / 2);
+    if (i % 2 === 0) {
+      // High Byte
+      registers[registerIndex] = (charCode << 8) & 0xff00;
+    } else {
+      // Low Byte
+      registers[registerIndex] |= (charCode & 0x00ff);
+    }
+  }
+  return registers;
+};
+
+// UInt16 Array to String
+export const registersToString = (registers) => {
+  let str = "";
+  for (let i = 0; i < registers.length; i++) {
+    const high = (registers[i] >> 8) & 0xff;
+    const low = registers[i] & 0xff;
+    if (high === 0) break;
+    str += String.fromCharCode(high);
+    if (low === 0) break;
+    str += String.fromCharCode(low);
+  }
+  return str.trim();
 };
 
 
@@ -398,7 +427,7 @@ export const getStatusMessage = (statusValue) => {
 
   const messages = [];
 
- 
+
 
   if (checkStatus(statusValue, STATUS_BITS.OVERWEIGHT)) {
 
@@ -440,7 +469,7 @@ export const getStatusMessage = (statusValue) => {
 
   }
 
- 
+
 
   return messages;
 
