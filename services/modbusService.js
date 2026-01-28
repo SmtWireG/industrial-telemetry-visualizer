@@ -161,8 +161,11 @@ class ModbusService {
     this.onDataCallback = null;
     this.readResolver = null;
 
+    // DİKKAT: Android'de subscription.remove() bazen kütüphane içi (BlePlx) 
+    // NullPointerException fırlatabiliyor. Bu yüzden burada sadece null'a çekiyoruz.
+    // Bağlantı kesildiğinde (cancelConnection) zaten monitor aboneliği sonlanacaktır.
     if (this.subscription) {
-      this.subscription.remove();
+      // this.subscription.remove(); // KRİTİK: Çökmeyi önlemek için devre dışı
       this.subscription = null;
     }
 

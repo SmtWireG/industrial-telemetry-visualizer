@@ -40,16 +40,26 @@ export default function WeightScreen() {
   const teardownConnection = useCallback(async (isManual = true) => {
     if (isTeardownRef.current) return;
     isTeardownRef.current = true;
+
     console.log(`🧹 Pasif kapatma süreci başladı... (isManual: ${isManual})`);
+
+    // 1. Polling'i hemen durdur
     isConnectedRef.current = false;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
-    // 2. JS taraflı referansları temizle
+
+    // 2. JS taraflı referansları ve callback'leri temizle (hata fırlatılmadan önce)
     modbusService.onDataCallback = null;
-    disconnectionSubscriptionRef.current = null;
+    if (disconnectionSubscriptionRef.current) {
+      // disconnectionSubscriptionRef.current.remove(); // BU DA RİSKLİ OLABİLİR
+      disconnectionSubscriptionRef.current = null;
+    }
+
+    // 3. Merkezi servisi kapat
     await modbusService.safeTeardown(isManual);
+
     setIsConnected(false);
     isConnectingRef.current = false;
     isTeardownRef.current = false;
