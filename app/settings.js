@@ -1,3 +1,4 @@
+import Constants from 'expo-constants';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
@@ -88,11 +89,10 @@ export default function SettingsScreen() {
     // Modbus Service'ini cihaz ID ile ayarla
     useEffect(() => {
         if (deviceId) {
-            // NOT: setDevice'a device objesi vermiyoruz çünkü details.js'de zaten set edildi
-            // ModbusService singleton olduğu için device objesi hala mevcut
-            console.log('✓ Settings ekranı - modbusService.device mevcut mu?', !!modbusService.device);
+            const isTCP = modbusService.transport === 'TCP';
+            console.log('✓ Settings ekranı - modbusService.device mevcut mu?', !!modbusService.device, '| Transport:', modbusService.transport);
 
-            if (!modbusService.device) {
+            if (!modbusService.device && !isTCP) {
                 console.error('❌ Settings ekranında device objesi yok! Details ekranından geçiş yapılmalı.');
                 Alert.alert('Hata', 'Lütfen önce Details ekranından cihaza bağlanın.');
             }
@@ -119,6 +119,10 @@ export default function SettingsScreen() {
     const [wirelessType, setWirelessType] = useState(0);
     const [ssid, setSsid] = useState("ESITWIFI");
     const [password, setPassword] = useState("ESIT1234");
+    const [ipAddress, setIpAddress] = useState("192.168.137.116");
+    const [port, setPort] = useState("23");
+    const [ipModalVisible, setIpModalVisible] = useState(false);
+
     const [r1Ctrl, setR1Ctrl] = useState(1);
     const [r1Val, setR1Val] = useState("1000");
     const [r1Hyst, setR1Hyst] = useState("0");
@@ -166,6 +170,33 @@ export default function SettingsScreen() {
         setModalVisible(true);
     };
 
+    // TCP Bağlantısı Başlat
+    const handleWiFiTransition = async () => {
+        setIpModalVisible(false);
+        setLoading(true);
+        try {
+            const trimmedIp = ipAddress.trim();
+            const numericPort = parseInt(port) || 502;
+            console.log(`[SETTINGS_SCREEN] TCP Geçişi başlatılıyor -> ${trimmedIp}:${numericPort}`);
+            // Önce BLE'yi pasif kapat
+            await modbusService.safeTeardown(false);
+
+            // Sonra TCP ile bağlan
+            const result = await modbusService.connectTCP(trimmedIp, numericPort);
+            if (result.success) {
+                modbusService.isTransitioningToWiFi = false; // Geçiş tamamlandı
+                Alert.alert("✓ Başarılı", "WiFi üzerinden TCP bağlantısı kuruldu. Tartım ekranına dönülüyor.");
+                router.replace({ pathname: "/details", params: { deviceId, deviceName: "WiFi Cihazı", transport: "TCP", ip: ipAddress } });
+            }
+        } catch (err) {
+            console.error("❌ TCP Geçiş Hatası:", err);
+            modbusService.isTransitioningToWiFi = false; // Hata durumunda bayrağı indir
+            Alert.alert("❌ TCP Bağlantı Hatası", err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     // Yardımcı: Register Yazma (GUI için)
     const writeRegisterUI = async (address, value, is32Bit = false) => {
         setLoading(true);
@@ -190,7 +221,15 @@ export default function SettingsScreen() {
         setLoading(true);
         try {
             await modbusService.writeWiFiSSID(ssid);
-            Alert.alert("✓ Başarılı", "SSID başarıyla yazıldı.");
+            modbusService.isTransitioningToWiFi = true; // Geçiş başladı
+            Alert.alert(
+                "✓ Başarılı",
+                "SSID başarıyla yazıldı. Şimdi WiFi moduna geçtikten sonra cihaz ekranındaki IP ile bağlanmak ister misiniz?",
+                [
+                    { text: "Daha Sonra", style: "cancel" },
+                    { text: "IP ile Bağlan", onPress: () => setIpModalVisible(true) }
+                ]
+            );
         } catch (err) {
             Alert.alert("❌ Hata", err.message);
         } finally {
@@ -203,7 +242,15 @@ export default function SettingsScreen() {
         setLoading(true);
         try {
             await modbusService.writeWiFiPassword(password);
-            Alert.alert("✓ Başarılı", "Şifre başarıyla yazıldı.");
+            modbusService.isTransitioningToWiFi = true; // Geçiş başladı
+            Alert.alert(
+                "✓ Başarılı",
+                "Şifre başarıyla yazıldı. Bağlantıyı TCP üzerinden sürdürmek için IP girin.",
+                [
+                    { text: "Kapat", style: "cancel" },
+                    { text: "IP Gir", onPress: () => setIpModalVisible(true) }
+                ]
+            );
         } catch (err) {
             Alert.alert("❌ Hata", err.message);
         } finally {
@@ -596,6 +643,54 @@ export default function SettingsScreen() {
                     <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}><Text style={{ color: 'white' }}>Kapat</Text></TouchableOpacity>
                 </View></View>
             </Modal>
+
+            {/* IP Giriş Modalı */}
+            <Modal visible={ipModalVisible} transparent={true} animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>IP Adresi Girin</Text>
+                        <Text style={styles.infoText}>Cihaz ekranında görünen IP adresini yazın.</Text>
+                        <Text style={{ fontSize: 12, color: '#666', marginBottom: 2, marginTop: 10 }}>IP Adresi:</Text>
+                        <TextInput
+                            style={styles.modalInput}
+                            value={ipAddress}
+                            onChangeText={setIpAddress}
+                            keyboardType="numeric"
+                            placeholder="192.168.137.116"
+                        />
+
+                        <Text style={{ fontSize: 12, color: '#666', marginBottom: 2, marginTop: 10 }}>Port (Varsayılan: 502):</Text>
+                        <TextInput
+                            style={styles.modalInput}
+                            value={port}
+                            onChangeText={setPort}
+                            keyboardType="numeric"
+                            placeholder="502"
+                        />
+
+                        <View style={{ backgroundColor: '#FFF9C4', padding: 8, borderRadius: 5, marginTop: 15, marginBottom: 10 }}>
+                            <Text style={{ fontSize: 11, color: '#F57F17' }}>
+                                ⚠️ "Host unreachable" alıyorsanız: Telefonunuzun Mobil Verisini kapatın ve cihazla aynı ağda olduğunuzdan emin olun.
+                            </Text>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                            <TouchableOpacity style={[styles.closeButton, { flex: 1, backgroundColor: '#757575' }]} onPress={() => setIpModalVisible(false)}>
+                                <Text style={{ color: 'white' }}>İptal</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.closeButton, { flex: 1, backgroundColor: '#4CAF50' }]} onPress={handleWiFiTransition}>
+                                <Text style={{ color: 'white' }}>Bağlan</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+            {/* Teşhis Bilgisi */}
+            <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%' }}>
+                <Text style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>
+                    Tel IP (Metro): {Constants.expoConfig?.hostUri || 'Bilinmiyor'} | Mod: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
+                </Text>
+            </View>
         </View>
     );
 }
@@ -626,7 +721,9 @@ const styles = StyleSheet.create({
     fullWidthButton: { backgroundColor: '#D1D1D1', padding: 12, borderRadius: 2, alignItems: 'center', marginTop: 10, borderWidth: 1, borderColor: '#BBB' },
     modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
     modalContent: { width: '80%', backgroundColor: '#fff', borderRadius: 10, padding: 20, maxHeight: '60%' },
+    modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 10, textAlign: 'center' },
     modalItem: { padding: 15, borderBottomWidth: 1, borderColor: '#eee' },
     modalText: { fontSize: 16, color: 'black' },
+    modalInput: { borderWidth: 1, borderColor: '#ccc', borderRadius: 5, padding: 10, width: '100%', marginBottom: 10, fontSize: 16, backgroundColor: '#f9f9f9', color: '#000' },
     closeButton: { marginTop: 15, backgroundColor: '#F44336', padding: 10, alignItems: 'center', borderRadius: 5 }
 });
