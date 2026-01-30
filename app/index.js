@@ -155,19 +155,23 @@ export default function HomeScreen() {
   };
 
   // --- WiFi TARAMA ---
+  // --- WiFi TARAMA (GÜNCELLENMİŞ HALİ) ---
   const startWiFiScan = async () => {
     setDevices([]);
     setIsScanning(true);
     setScanProgress(0);
 
     try {
-      console.log(`[UI] WiFi Taraması Başlatılıyor (${subnet}.x)...`);
-      const found = await ModbusService.scanNetwork(subnet, (progress) => {
+      console.log(`[UI] Akıllı WiFi Taraması Başlatılıyor...`);
+
+      // ESKİ KOD: const found = await ModbusService.scanNetwork(subnet, ...);
+      // YENİ KOD: Artık smartScan kullanıyoruz, subnet parametresi vermemize gerek yok.
+      const found = await ModbusService.smartScan((progress) => {
         setScanProgress(progress);
       });
 
       if (found.length === 0) {
-        Alert.alert("Sonuç", `${subnet}.x ağında cihaz bulunamadı. Cihazın IP'sini biliyorsanız Manüel IP ikonuna tıklayıp ekleyin.`);
+        Alert.alert("Sonuç", "Hiçbir ağda (192.168.1.x, 137.x, 4.x) cihaz bulunamadı. \n\nLütfen cihazın ve telefonun aynı Hotspot'a bağlı olduğundan emin olun.");
       }
 
       setDevices(found.map(d => ({
@@ -178,7 +182,7 @@ export default function HomeScreen() {
         type: 'TCP'
       })));
 
-      // Bulunanları otomatik hafızaya ekle (Opsiyonel)
+      // Bulunanları otomatik hafızaya ekle
       if (found.length > 0) {
         found.forEach(d => saveDevice({ id: d.ip, name: d.name, ip: d.ip, port: d.port, type: 'TCP' }));
       }
@@ -189,6 +193,11 @@ export default function HomeScreen() {
       setIsScanning(false);
     }
   };
+
+
+
+
+
 
   const addManualDevice = () => {
     const trimmedIp = manualIp.trim();
@@ -309,7 +318,7 @@ export default function HomeScreen() {
             style={[styles.scanBtn, styles.manualBtn]}
             onPress={() => setIsManualModalVisible(true)}
           >
-            <Text style={styles.btnText}>+ MANÜEL</Text>
+            <Text style={styles.btnText}>+ MANUEL IP EKLE</Text>
           </TouchableOpacity>
         </View>
 
@@ -317,7 +326,7 @@ export default function HomeScreen() {
           style={styles.subnetConfig}
           onPress={() => setIsSubnetModalVisible(true)}
         >
-          <Text style={styles.subnetText}>⚙️ Ağ Maskesi: {subnet}.x (Değiştir)</Text>
+          <Text style={styles.subnetText}>⚙️ Subnet: {subnet}.x (Değiştir)</Text>
         </TouchableOpacity>
 
         {isScanning && (

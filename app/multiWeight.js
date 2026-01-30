@@ -21,17 +21,28 @@ export default function MultiWeightScreen() {
     const devices = JSON.parse(devicesJson || "[]");
 
     useEffect(() => {
-        // Tüm cihazlara bağlan
-        devices.forEach(connDevice => {
-            connectToDevice(connDevice);
-        });
+        const startAllConnections = async () => {
+            for (const connDevice of devices) {
+                // Her cihaz bağlantısı arasında 1 saniye bekle (Android ağ stack'i için)
+                await connectToDevice(connDevice);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        };
+
+        startAllConnections();
 
         return () => {
             // Temizlik: Tüm bağlantıları kapat ve interval'leri durdur
             Object.keys(sessionsRef.current).forEach(id => {
-                sessionsRef.current[id].safeTeardown(true);
+                const session = sessionsRef.current[id];
+                if (session) {
+                    session.isTeardown = true; // Logları sustur
+                    session.safeTeardown(true);
+                }
             });
-            Object.values(intervalsRef.current).forEach(clearInterval);
+            Object.values(intervalsRef.current).forEach(id => {
+                if (id) clearTimeout(id);
+            });
         };
     }, []);
 
@@ -59,17 +70,37 @@ export default function MultiWeightScreen() {
                 parseAndSetData(sessionId, data, session); // session instance'ını geçiyoruz
             };
 
-            // Polling başlat (Ağırlık ve durum oku)
+            // 1. Önce Ayarları Oku (Register 118: Nokta, 119: Birim)
+            try {
+                await session.sendCommand(3, 118, 2);
+            } catch (e) {
+                console.warn(`[MULTI] ${deviceInfo.name} settings error:`, e.message);
+            }
+
+            // 2. Polling başlat (Ağırlık ve durum oku - Register 7: Status, 8-9: Weight)
             let isActive = true;
             const poll = async () => {
-                if (!isActive) return;
+                if (!isActive || session.isTeardown) return;
                 try {
                     await session.sendCommand(3, 7, 3);
                 } catch (e) {
-                    console.warn(`[MULTI] ${deviceInfo.name} poll error:`, e.message);
+                    // Bağlantı koptuysa yeniden bağlanmayı dene
+                    if (e.message.includes("Socket null") || e.message.includes("mevcut değil")) {
+                        console.log(`[MULTI] ${deviceInfo.name} bağlantısı koptu, yeniden deneniyor...`);
+                        updateDeviceState(sessionId, { status: 'Yeniden Bağlanıyor...', isConnected: false });
+                        try {
+                            await session.connectTCP(deviceInfo.ip, deviceInfo.port);
+                            updateDeviceState(sessionId, { status: 'Bağlı', isConnected: true });
+                        } catch (reconnectErr) {
+                            // Yeniden bağlanamazsa bir sonraki turda veya manuel müdahalede denenecektir
+                        }
+                    } else if (!session.isTeardown) {
+                        console.warn(`[MULTI] ${deviceInfo.name} poll error:`, e.message);
+                    }
                 }
-                if (isActive) {
-                    const timeoutId = setTimeout(poll, 300);
+
+                if (isActive && !session.isTeardown) {
+                    const timeoutId = setTimeout(poll, 400);
                     intervalsRef.current[sessionId] = timeoutId;
                 }
             };
@@ -83,31 +114,58 @@ export default function MultiWeightScreen() {
 
     const parseAndSetData = (id, data, session) => {
         try {
-            // Modbus TCP (502) ile RTU Over TCP (23) farklı ofsetler kullanır
             const isStandardTCP = session.transport === 'TCP' && session.port === 502;
             const funcCode = isStandardTCP ? data[7] : data[1];
             if (funcCode !== 3) return;
 
             const dataOffset = isStandardTCP ? 9 : 3;
-            const status = (data[dataOffset] << 8) | data[dataOffset + 1];
-            const isStable = (status & (1 << 6)) !== 0;
+            const byteCount = isStandardTCP ? data[8] : data[2];
 
-            const highWord = (data[dataOffset + 2] << 8) | data[dataOffset + 3];
-            const lowWord = (data[dataOffset + 4] << 8) | data[dataOffset + 5];
-            let rawValue = (highWord << 16) | lowWord;
-            if (rawValue & 0x80000000) rawValue -= 0x100000000;
+            // DURUM 1: AYARLAR (Nokta ve Birim) - 2 register 4 byte
+            if (byteCount === 4) {
+                const dotVal = (data[dataOffset] << 8) | data[dataOffset + 1];
+                const unitCode = (data[dataOffset + 2] << 8) | data[dataOffset + 3];
+                const unitMap = { 0: 'kg', 1: 'g', 2: 'lb', 3: 'mV/V', 4: 'mV' };
+                updateDeviceState(id, {
+                    dot: (dotVal >= 0 && dotVal <= 5) ? dotVal : 0,
+                    unit: unitMap[unitCode] || 'kg'
+                });
+                return;
+            }
 
-            // Şimdilik noktayı (dot) 0 varsayalım veya her cihaz için ayrıca oku
-            setDeviceStates(prev => ({
-                ...prev,
-                [id]: {
-                    ...prev[id],
-                    weight: (rawValue / 100).toFixed(2), // Örnek: 2 nokta varsayımı
-                    isStable,
-                    status: 'Aktif'
-                }
-            }));
-        } catch (e) { }
+            // DURUM 2: AĞIRLIK VERİSİ - 3 register 6 byte
+            if (byteCount >= 6) {
+                const status = (data[dataOffset] << 8) | data[dataOffset + 1];
+                const isStable = (status & (1 << 6)) !== 0;
+                const hasTare = (status & (1 << 10)) !== 0; // TARE_EXIST bit 10
+
+                const highWord = (data[dataOffset + 2] << 8) | data[dataOffset + 3];
+                const lowWord = (data[dataOffset + 4] << 8) | data[dataOffset + 5];
+
+                // JS Bitwise operators zaten 32-bit signed sonuç üretir.
+                const rawValue = (highWord << 16) | lowWord;
+
+                // State'deki güncel nokta ve birim bilgisini alalım
+                setDeviceStates(prev => {
+                    const deviceState = prev[id] || {};
+                    const currentDot = deviceState.dot || 0;
+                    const formatted = (rawValue / Math.pow(10, currentDot)).toFixed(currentDot);
+
+                    return {
+                        ...prev,
+                        [id]: {
+                            ...deviceState,
+                            weight: formatted,
+                            isStable,
+                            hasTare,
+                            status: 'Aktif'
+                        }
+                    };
+                });
+            }
+        } catch (e) {
+            console.error("[MULTI_PARSE] Error:", e);
+        }
     };
 
     const updateDeviceState = (id, newState) => {
@@ -123,7 +181,14 @@ export default function MultiWeightScreen() {
 
         try {
             if (cmd === 'ZERO') await session.zero();
-            if (cmd === 'TARE') await session.tare();
+            if (cmd === 'TARE') {
+                const state = deviceStates[id] || {};
+                if (state.hasTare) {
+                    await session.clearTare();
+                } else {
+                    await session.tare();
+                }
+            }
         } catch (error) {
             Alert.alert("Komut Hatası", error.message);
         }
@@ -140,7 +205,7 @@ export default function MultiWeightScreen() {
 
                 <View style={styles.weightContainer}>
                     <Text style={styles.weightText}>{state.weight}</Text>
-                    <Text style={styles.unitText}>kg</Text>
+                    <Text style={styles.unitText}>{state.unit || 'kg'}</Text>
                 </View>
 
                 <View style={styles.infoRow}>
@@ -161,7 +226,7 @@ export default function MultiWeightScreen() {
                         style={[styles.miniBtn, { backgroundColor: '#2196F3' }]}
                         onPress={() => handleCommand(item.id, 'TARE')}
                     >
-                        <Text style={styles.miniBtnText}>TARE</Text>
+                        <Text style={styles.miniBtnText}>{state.hasTare ? "DARA İPTAL" : "TARE"}</Text>
                     </TouchableOpacity>
                 </View>
             </View>

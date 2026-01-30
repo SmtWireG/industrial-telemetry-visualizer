@@ -13,12 +13,12 @@ export default function WeightScreen() {
   // --- STATE ---
   const [isConnected, setIsConnected] = useState(false);
   const [currentTransport, setCurrentTransport] = useState(transport || 'BLE');
-  const [weightDisplay, setWeightDisplay] = useState("0.0");
+  const [weightDisplay, setWeightDisplay] = useState("0.1");
   const [unit, setUnit] = useState("kg");
   const [isStable, setIsStable] = useState(false);
   const [hasTare, setHasTare] = useState(false);
   const [isOverload, setIsOverload] = useState(false);
-  const [ipAddress, setIpAddress] = useState(ip || "192.168.137.116");
+  const [ipAddress, setIpAddress] = useState(ip || "192.168.137.182");
   const [port, setPort] = useState(routePort || "23");
   const [ipModalVisible, setIpModalVisible] = useState(false);
   const [dot, setDot] = useState(0);
@@ -173,7 +173,12 @@ export default function WeightScreen() {
           // JS Bitwise operators (<<, |) zaten 32-bit signed integer sonuç üretir.
           const rawValue = (highWord << 16) | lowWord;
 
-          const currentDot = lastDotRef.current;
+          // Nokta hanesi kontrolü (RangeError: toFixed hatasını önlemek için)
+          let currentDot = parseInt(lastDotRef.current);
+          if (isNaN(currentDot) || currentDot < 0 || currentDot > 5) {
+            currentDot = 0; // Geçersiz veri gelirse virgülsüz göster
+          }
+
           const formatted = (rawValue / Math.pow(10, currentDot)).toFixed(currentDot);
           setWeightDisplay(formatted);
         }
@@ -247,26 +252,46 @@ export default function WeightScreen() {
       let isActive = true;
 
       const poll = async () => {
-        if (!isActive || !isConnectedRef.current || isTeardownRef.current || modbusService.transport === 'NONE') {
-          if (modbusService.transport === 'NONE' && isConnectedRef.current) {
-            console.log("[DETAILS] Bağlantı kaybı tespit edildi, polling durduruluyor.");
-            setIsConnected(false);
-            isConnectedRef.current = false;
+        if (!isActive || isTeardownRef.current) return;
+
+        // Eğer bağlantı tamamen koptuysa (transport NONE)
+        if (modbusService.transport === 'NONE' || !isConnectedRef.current) {
+          if (isConnectedRef.current) {
+            console.log("[DETAILS] Bağlantı koptu, yeniden bağlanılıyor...");
+            try {
+              // Eskisi gibi 3s beklemek yerine hemen dene (veya çok kısa bekle)
+              await new Promise(r => setTimeout(r, 500));
+              await modbusService.connectTCP(ip, port);
+
+              // Cihaz düşmeden hemen ayarları tazele (Eğer gerekliyse)
+              if (!unit) {
+                console.log("[DETAILS] Ayarlar eksik, çekiliyor...");
+                await new Promise(r => setTimeout(r, 100));
+                await fetchSettings();
+              }
+            } catch (reErr) {
+              console.warn("[DETAILS] Reconnect denemesi başarısız.");
+            }
           }
+          // Bağlantı yokken 2 saniye bekleyip tekrar dene
+          timeoutId = setTimeout(poll, 2000);
           return;
         }
 
         try {
           await modbusService.sendCommand(3, 7, 3, null, false, false);
         } catch (e) {
-          if (!isTeardownRef.current) {
+          // Bağlantı kopma aşamasındayken veya bilinen hatalarda uyarıları sustur
+          const isIgnorable = e.message.includes("NONE") || e.message.includes("Socket null") || isTeardownRef.current;
+          if (!isIgnorable) {
             console.warn("[WEIGHT_SCREEN] Poll hatası:", e.message);
           }
         }
 
-        // Bir sonraki sorguyu planla
+        // Bir sonraki sorguyu planla (WiFi için 300ms daha stabil)
         if (isActive && isConnectedRef.current && !isTeardownRef.current) {
-          timeoutId = setTimeout(poll, 150);
+          const delay = modbusService.transport === 'TCP' ? 300 : 150;
+          timeoutId = setTimeout(poll, delay);
         }
       };
 
@@ -473,8 +498,11 @@ export default function WeightScreen() {
           <TouchableOpacity style={[styles.actionButton, { backgroundColor: '#FF9800' }]} onPress={() => modbusService.zero()}>
             <Text style={styles.buttonText}>ZERO</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.actionButton, { backgroundColor: '#2196F3' }]} onPress={() => modbusService.tare()}>
-            <Text style={styles.buttonText}>TARE</Text>
+          <TouchableOpacity
+            style={[styles.actionButton, { backgroundColor: '#2196F3' }]}
+            onPress={() => hasTare ? modbusService.clearTare() : modbusService.tare()}
+          >
+            <Text style={styles.buttonText}>{hasTare ? "DARA İPTAL" : "TARE"}</Text>
           </TouchableOpacity>
         </View>
         <TouchableOpacity

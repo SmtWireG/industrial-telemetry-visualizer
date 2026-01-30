@@ -192,23 +192,18 @@ export default function SettingsScreen() {
         setIpModalVisible(false);
         setLoading(true);
         try {
-            const trimmedIp = ipAddress.toString().trim();
+            const trimmedIp = ipAddress.trim();
             const numericPort = parseInt(port) || 502;
             console.log(`[SETTINGS_SCREEN] TCP Geçişi başlatılıyor -> ${trimmedIp}:${numericPort}`);
-
             // Önce BLE'yi pasif kapat
             await modbusService.safeTeardown(false);
 
-            // KRİTİK: Cihazın WiFi'ye bağlanması ve IP alması için 3 saniye bekle
-            // Bu bekleme süresi olmazsa "Host unreachable" hatası alınır.
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            // Sonra TCP ile bağlan (Bu aşamada 10 deneme yapacak)
-            const result = await modbusService.connectTCP(trimmedIp, numericPort, 10);
+            // Sonra TCP ile bağlan
+            const result = await modbusService.connectTCP(trimmedIp, numericPort);
             if (result.success) {
                 modbusService.isTransitioningToWiFi = false; // Geçiş tamamlandı
                 Alert.alert("✓ Başarılı", "WiFi üzerinden TCP bağlantısı kuruldu. Tartım ekranına dönülüyor.");
-                router.replace({ pathname: "/details", params: { deviceId, deviceName: "WiFi Cihazı", transport: "TCP", ip: trimmedIp } });
+                router.replace({ pathname: "/details", params: { deviceId, deviceName: "WiFi Cihazı", transport: "TCP", ip: ipAddress } });
             }
         } catch (err) {
             console.error("❌ TCP Geçiş Hatası:", err);
@@ -244,52 +239,6 @@ export default function SettingsScreen() {
                                         Alert.alert("Başarılı", "Cihaz BLE moduna alındı. Lütfen BLE ile tekrar tarama yapın.");
                                     }, 2000);
                                 } catch (e) {
-                                    Alert.alert("Hata", "Mod değiştirilemedi: " + e.message);
-                                } finally {
-                                    setLoading(false);
-                                }
-                            }
-                        }
-                    ]
-                );
-                return;
-            } else if (value === 2) { // Wifi seçiliyse (Geçiş olsun veya olmasın)
-                if (!ssid || !password) {
-                    Alert.alert("Hata", "Lütfen önce WiFi adı (SSID) ve şifresini kaydedin.");
-                    setWirelessType(1); // Geri al
-                    return;
-                }
-
-                // Eğer zaten TCP ise doğrudan modal aç
-                if (isTCP) {
-                    setIpModalVisible(true);
-                    return;
-                }
-
-                Alert.alert(
-                    "Kablosuz Mod Değişimi",
-                    "Cihaz WiFi moduna bağlanmaya çalışacak. Bluetooth bağlantısı kesilecektir. Devam edilsin mi?",
-                    [
-                        { text: "İptal", style: "cancel" },
-                        {
-                            text: "Evet, Başlat",
-                            onPress: async () => {
-                                try {
-                                    setLoading(true);
-                                    modbusService.isTransitioningToWiFi = true;
-                                    await modbusService.writeRegister(48, 2);
-
-                                    Alert.alert(
-                                        "İşlem Başlatıldı",
-                                        "Cihaz WiFi moduna geçiyor. Bağlantı için IP adresi ve port bilgilerini girin.",
-                                        [{
-                                            text: "IP Gir", onPress: () => {
-                                                setIpModalVisible(true);
-                                            }
-                                        }]
-                                    );
-                                } catch (e) {
-                                    modbusService.isTransitioningToWiFi = false;
                                     Alert.alert("Hata", "Mod değiştirilemedi: " + e.message);
                                 } finally {
                                     setLoading(false);
@@ -780,29 +729,6 @@ export default function SettingsScreen() {
                     <View style={styles.modalContent}>
                         <Text style={styles.modalTitle}>IP Adresi Girin</Text>
                         <Text style={styles.infoText}>Cihaz ekranında görünen IP adresini yazın.</Text>
-
-                        {/* Subnet Kontrol Uyarısı */}
-                        {(() => {
-                            const hostUri = Constants.expoConfig?.hostUri || "";
-                            if (hostUri && ipAddress) {
-                                const phoneSubnet = hostUri.split(':')[0].split('.').slice(0, 3).join('.');
-                                const deviceSubnet = ipAddress.split('.').slice(0, 3).join('.');
-                                if (phoneSubnet !== deviceSubnet) {
-                                    return (
-                                        <View style={{ backgroundColor: '#FFEBEE', padding: 10, borderRadius: 10, marginTop: 10, marginBottom: 5 }}>
-                                            <Text style={{ fontSize: 11, color: '#D32F2F', fontWeight: 'bold', textAlign: 'center' }}>
-                                                ⚠️ AĞ UYUMSUZLUĞU!
-                                            </Text>
-                                            <Text style={{ fontSize: 10, color: '#D32F2F', textAlign: 'center' }}>
-                                                Telefon: {phoneSubnet}.x | Cihaz: {deviceSubnet}.x
-                                            </Text>
-                                        </View>
-                                    );
-                                }
-                            }
-                            return null;
-                        })()}
-
                         <Text style={{ fontSize: 12, color: '#666', marginBottom: 2, marginTop: 10 }}>IP Adresi:</Text>
                         <TextInput
                             style={styles.modalInput}

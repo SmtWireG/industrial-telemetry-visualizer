@@ -28,6 +28,7 @@ export class ModbusService {
     this.queue = [];
     this.processing = false;
     this.isRebooting = false;
+    this.isConnecting = false;
     this.isTransitioningToWiFi = false;
     this.onDataCallback = null;
     this.readResolver = null;
@@ -40,6 +41,16 @@ export class ModbusService {
    */
   setDevice(deviceId, device, slaveId = 1) {
     console.log(`[MODBUS_SERVICE] 📱 BLE Cihazı Ayarlanıyor: ${deviceId}`);
+
+    // NÜKLEER SIFIRLAMA: BLE'ye geçerken WiFi kalıntılarını temizle
+    this.isTransitioningToWiFi = false;
+    this.isConnecting = false;
+    if (this.tcpClient) {
+      console.log("[MODBUS_SERVICE] 🔌 Eski TCP temziği yapılıyor...");
+      try { this.tcpClient.destroy(); } catch (e) { }
+      this.tcpClient = null;
+    }
+
     this.deviceId = deviceId;
     this.device = device;
     this.slaveId = slaveId;
@@ -56,11 +67,18 @@ export class ModbusService {
   async connectTCP(ip, port = 502, retryCount = 10) {
     if (!ip) throw new Error("IP adresi belirtilmedi.");
     const cleanIp = ip.toString().trim();
-    let cleanPort = parseInt(port) || 502;
+    const cleanPort = parseInt(port) || 502;
+
+    console.log(`[MODBUS_SERVICE] 🚀 TCP Bağlantı İsteği: ${cleanIp}:${cleanPort}`);
+
+    // AGGRESSIVE RESET: Önce her şeyi (varsa eski soketleri) temizle
+    await this.safeTeardown(false);
 
     this.transport = 'TCP';
     this.ip = cleanIp;
     this.port = cleanPort;
+    this.isConnecting = true;
+    this.queue = [];
 
     console.log(`[MODBUS_SERVICE] 🚀 TCP Bağlantı Süreci Başladı: ${cleanIp}:${cleanPort} (Retry: ${retryCount})`);
 
@@ -68,8 +86,12 @@ export class ModbusService {
       try {
         console.log(`[MODBUS_SERVICE] 🌐 Deneme ${i}/${retryCount} -> ${cleanIp}:${cleanPort}`);
         const result = await this._doConnect(cleanIp, cleanPort);
+        // Minimal Yerleşme: 50ms bekle (Cihazı boş bırakma)
+        await new Promise(r => setTimeout(r, 50));
+        this.isConnecting = false;
         return result;
       } catch (error) {
+        this.isConnecting = false;
         console.warn(`[MODBUS_SERVICE] ⚠️ Deneme ${i} Başarısız: ${error.message}`);
 
         if (i === retryCount) {
@@ -82,68 +104,119 @@ export class ModbusService {
     }
   }
 
+
+
+
+
+
   _doConnect(ip, port) {
     return new Promise((resolve, reject) => {
-      try {
-        if (this.tcpClient) {
+      // Temizlik: Varsa eski bağlantıyı kapat
+      if (this.tcpClient) {
+        try {
           this.tcpClient.destroy();
-          this.tcpClient = null;
+        } catch (e) { }
+        this.tcpClient = null;
+      }
+
+      this.ip = ip;
+      this.port = port;
+      this.transport = 'TCP';
+
+      let isResolved = false;
+      let timer = null;
+
+      // Yerel değişken kullanımı (Race condition önleyici)
+      const client = TcpSocket.createConnection({ host: ip, port: port }, () => {
+        // Eğer zaman aşımı (timeout) çoktan çalıştıysa işlem yapma
+        if (isResolved) {
+          try { client.destroy(); } catch (e) { }
+          return;
         }
 
-        this.ip = ip;
-        this.port = port;
-        this.transport = 'TCP';
+        console.log(`[MODBUS_SERVICE] ✅ TCP Bağlantısı BAŞARILI (${ip}:${port})`);
 
-        let isResolved = false;
+        // HATA ÇÖZÜMÜ: this.tcpClient yerine direkt 'client' değişkenini kullanıyoruz
+        // Böylece this.tcpClient null olsa bile bu yerel değişken hala yaşıyordur.
+        try {
+          client.setNoDelay(true);
+        } catch (err) {
+          console.warn("[MODBUS_SERVICE] setNoDelay hatası (Önemsiz):", err.message);
+        }
 
-        this.tcpClient = TcpSocket.createConnection({ host: ip, port: port }, () => {
-          console.log(`[MODBUS_SERVICE] ✅ TCP Bağlantısı BAŞARILI (${ip}:${port})`);
-          // Nagle Algoritmasını devre dışı bırak (Gecikmeyi önlemek için)
-          this.tcpClient.setNoDelay(true);
+        // Zamanlayıcıyı iptal et
+        if (timer) clearTimeout(timer);
+
+        isResolved = true;
+        resolve({ success: true });
+      });
+
+      // Global değişkene ata
+      this.tcpClient = client;
+
+      client.on('data', (data) => {
+        // TCP Kaynağından geldiğini belirt
+        this.handleIncomingData(Array.from(data), 'TCP');
+      });
+
+      client.on('error', (error) => {
+        if (!isResolved) {
           isResolved = true;
-          resolve({ success: true });
-        });
+          if (timer) clearTimeout(timer);
+          console.error(`[MODBUS_SERVICE] ❌ TCP Hata Mesajı: ${error.message}`);
+          reject(new Error(error.message));
+        }
 
-        this.tcpClient.on('data', (data) => {
-          this.handleIncomingData(Array.from(data));
-        });
+        // KRİTİK: Bekleyen okuma varsa iptal et (Zombi temizliği)
+        if (this.readResolver) {
+          this.readResolver({ success: false, error: 'Connection lost' });
+          this.readResolver = null;
+        }
 
-        this.tcpClient.on('error', (error) => {
-          if (!isResolved) {
-            isResolved = true;
-            console.error(`[MODBUS_SERVICE] ❌ TCP Hatası Detayı:`, error);
-            const errorMsg = error?.message || (error ? JSON.stringify(error) : 'Bilinmeyen TCP Hatası');
-            console.error(`[MODBUS_SERVICE] ❌ TCP Hata Mesajı: ${errorMsg}`);
-            reject(new Error(errorMsg));
-          }
-          // Hata durumunda da temizlik yap ki "Socket is closed" sarmalına girmesin
+        // Hata durumunda sınıfı ve kuyruğu temizle
+        this.tcpClient = null;
+        this.transport = 'NONE';
+        this.isConnecting = false;
+        this.queue = [];
+      });
+
+      client.on('close', () => {
+        console.log(`[MODBUS_SERVICE] 🔌 TCP Bağlantısı Kapandı (${this.ip})`);
+
+        // KRİTİK: Bekleyen okuma varsa iptal et
+        if (this.readResolver) {
+          this.readResolver({ success: false, error: 'Connection closed' });
+          this.readResolver = null;
+        }
+
+        if (this.tcpClient === client) {
           this.tcpClient = null;
           this.transport = 'NONE';
-        });
+          this.isConnecting = false;
+          this.queue = [];
+        }
+      });
 
-        this.tcpClient.on('close', () => {
-          console.log(`[MODBUS_SERVICE] 🔌 TCP Bağlantısı Kapandı (${this.ip})`);
-          this.tcpClient = null;
-          this.transport = 'NONE';
-        });
-
-        // 6 saniye timeout
-        setTimeout(() => {
-          if (!isResolved) {
-            isResolved = true;
-            if (this.tcpClient) {
-              this.tcpClient.destroy();
-              this.tcpClient = null;
-            }
-            reject(new Error("Bağlantı zaman aşımı (6s)"));
+      // 4 saniye timeout (Hotspot gecikmeleri için ideal süre)
+      timer = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          console.warn(`[MODBUS_SERVICE] ⚠️ Zaman aşımı (${ip})`);
+          if (client) {
+            try { client.destroy(); } catch (e) { }
           }
-        }, 6000);
-
-      } catch (err) {
-        reject(err);
-      }
+          // Burada this.tcpClient = null YAPMIYORUZ, çünkü 'close' event'i zaten yapacak.
+          // Manuel yaparsak yukarıdaki race condition oluşuyor.
+          reject(new Error("Bağlantı zaman aşımı (4s)"));
+        }
+      }, 4000);
     });
   }
+
+
+
+
+
 
   /**
    * BLE Notification kanalını açar.
@@ -164,7 +237,8 @@ export class ModbusService {
         }
         if (characteristic?.value) {
           const data = Buffer.from(characteristic.value, 'base64');
-          this.handleIncomingData(Array.from(data));
+          // BLE Kaynağından geldiğini belirt
+          this.handleIncomingData(Array.from(data), 'BLE');
         }
       },
       `modbus_monitor_${this.deviceId}`
@@ -174,11 +248,24 @@ export class ModbusService {
   /**
    * Gelen ham veriyi Modbus protokolüne göre işler.
    */
-  handleIncomingData(data) {
-    // Okuma yanıtı kontrolü (FC 3)
-    // Modbus TCP (502) ile RTU Over TCP (23) farklı ofsetler kullanır
+  handleIncomingData(data, source) {
+    // ÇAKIŞMA ÖNLEYİCİ: Eğer gelen veri şu anki taşıma moduyla uyuşmuyorsa görmezden gel
+    if (source && source !== this.transport) {
+      // Sesi çok çıkarmadan görmezden gel (Log kirliliği yapma)
+      return;
+    }
+
     const isStandardTCP = this.transport === 'TCP' && this.port === 502;
     const funcCode = isStandardTCP ? data[7] : data[1];
+
+    // MODBUS ERROR CHECK (FC | 0x80)
+    if (this.readResolver && (funcCode & 0x80)) {
+      const resolver = this.readResolver;
+      this.readResolver = null;
+      // Sessiz hata (Log kirliliğini önle)
+      resolver({ success: false, error: `Modbus Exception 0x${funcCode.toString(16)}` });
+      return;
+    }
 
     if (this.readResolver && (funcCode === 3)) {
       const resolver = this.readResolver;
@@ -192,6 +279,13 @@ export class ModbusService {
         registers.push((data[dataOffset + i] << 8) | data[dataOffset + i + 1]);
       }
       resolver({ success: true, registers });
+    }
+
+    // FC 6 ve 16 (Yazma) cevaplarını yakala (Echo kontrolü)
+    if (this.readResolver && (funcCode === 6 || funcCode === 16)) {
+      const resolver = this.readResolver;
+      this.readResolver = null;
+      resolver({ success: true, functionCode: funcCode });
     }
 
     // Global dinleyiciye veriyi ilet
@@ -212,9 +306,9 @@ export class ModbusService {
       const item = { functionCode, startAddress, quantity, values, withoutResponse, resolve, reject };
 
       if (isPriority) {
-        // Öncelikli komutları (ZERO/TARE gibi) sıranın başına ekle (ama mevcut işleme dokunma)
+        // Öncelikli komutları (ZERO/TARE gibi) sıranın başına ekle
         this.queue.unshift(item);
-        console.log(`[MODBUS_SERVICE] ⚡ Öncelikli komut sıraya alındı: Addr ${startAddress}`);
+        console.log(`[MODBUS_SERVICE] ⚡ Öncelikli komut (${this.ip || this.deviceId}) sıraya alındı: Addr ${startAddress}`);
       } else {
         // Okuma komutları için kuyruk şişmesini önle
         if (functionCode === 3 && this.queue.length > 5) {
@@ -241,25 +335,42 @@ export class ModbusService {
     }
     const { functionCode, startAddress, quantity, values, withoutResponse, resolve, reject } = item;
 
+    // YARIŞ HALİ ÖNLEYİCİ: İşlem başladığı andaki durumu sabitle
+    const currentTransport = this.transport;
+    const currentTcpClient = this.tcpClient;
+    const currentDevice = this.device;
+
     try {
       let request;
-      if (this.transport === 'BLE') {
-        if (!this.device) throw new Error('Cihaz bağlı değil (BLE)');
+      if (currentTransport === 'BLE') {
+        if (!currentDevice) throw new Error('Cihaz bağlı değil (BLE)');
 
         request = buildModbusMessage(this.slaveId, functionCode, startAddress, quantity, values);
         const base64Data = Buffer.from(request).toString('base64');
 
         if (withoutResponse) {
-          await this.device.writeCharacteristicWithoutResponseForService(this.serviceUUID, this.characteristicUUID, base64Data);
+          await currentDevice.writeCharacteristicWithoutResponseForService(this.serviceUUID, this.characteristicUUID, base64Data);
         } else {
-          await this.device.writeCharacteristicWithResponseForService(this.serviceUUID, this.characteristicUUID, base64Data);
+          await currentDevice.writeCharacteristicWithResponseForService(this.serviceUUID, this.characteristicUUID, base64Data);
         }
-      } else {
-        if (!this.tcpClient) throw new Error('TCP Bağlantısı mevcut değil (Socket null)');
+      } else if (currentTransport === 'TCP') {
+        // TCP bağlantısı kuruluyor mu bekleyelim mi?
+        if (this.isConnecting) {
+          console.log(`[MODBUS_SERVICE] ⏳ ${this.ip} bağlantısı bekleniyor...`);
+          for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 100));
+            if (!this.isConnecting && this.tcpClient) break;
+          }
+        }
 
+        if (!this.tcpClient) throw new Error(`TCP Bağlantısı mevcut değil (${this.ip || 'No IP'})`);
+      } else {
+        throw new Error(`Geçersiz Transport: ${currentTransport}`);
+      }
+
+      if (currentTransport === 'TCP' && this.tcpClient) {
         try {
           if (this.port === 502) {
-            // Modbus TCP (MBAP Header + PDU)
             const pdu = this.buildPDU(functionCode, startAddress, quantity, values);
             request = Buffer.alloc(7 + pdu.length);
             request.writeUInt16BE(Math.floor(Math.random() * 65535), 0);
@@ -268,19 +379,18 @@ export class ModbusService {
             request.writeUInt8(this.slaveId, 6);
             pdu.copy(request, 7);
           } else {
-            // RTU Over TCP
             request = buildModbusMessage(this.slaveId, functionCode, startAddress, quantity, values);
           }
           this.tcpClient.write(request);
         } catch (writeErr) {
+          console.error(`[MODBUS_SERVICE] ❌ ${this.ip} Yazma Hatası:`, writeErr.message);
           this.tcpClient = null;
-          this.transport = 'NONE';
           throw new Error("Socket yazma hatası: " + writeErr.message);
         }
       }
 
-      // Okuma bekliyor ise
-      if (functionCode === 3) {
+      // HANDSHAKING: Tüm modlarda (BLE ve TCP) cevap bekle (eğer response isteniyorsa)
+      if (!withoutResponse) {
         const result = await new Promise((res) => {
           this.readResolver = res;
           setTimeout(() => {
@@ -290,14 +400,17 @@ export class ModbusService {
             }
           }, 1500);
         });
+
+        // İşlem sonrası nefes payı (Cihazı yormamak için)
+        await new Promise(r => setTimeout(r, 50));
         resolve(result);
       } else {
-        // Yazma komutlarından sonra bekleme süresini azalt (Performans artışı)
-        await new Promise(r => setTimeout(r, 20));
-        resolve({ success: true, address: startAddress });
+        // Response istenmeyen durumlarda (Restart vb.) bekleme ama resolve et
+        await new Promise(r => setTimeout(r, 50));
+        resolve({ success: true });
       }
     } catch (error) {
-      if (!this.isTeardown) {
+      if (!this.isTeardown && !error.message.includes("NONE")) {
         console.error(`[MODBUS_SERVICE] ❌ İşlem Hatası (Addr: ${startAddress}):`, error.message);
       }
       reject(error);
@@ -337,23 +450,24 @@ export class ModbusService {
   /**
    * Ağ Taraması (Subnet Scanning) - Sınıf seviyesinde yardımcı metod.
    */
-  /**
-   * Ağ Taraması (Subnet Scanning) - Sınıf seviyesinde yardımcı metod.
-   */
   static async scanNetwork(subnet, onProgress) {
+
     const foundDevices = [];
-    const ports = [23, 502];
-    const timeout = 1200; // Optimize: 1.2 saniye bekleme
+
+
+    const ports = [502, 23]; // Önce 502'yi denesin (Genelde standart budur)
     const subnetToScan = subnet.trim();
 
-    console.log(`[MODBUS_SCAN] 🔍 Hyper-Speed Tarama Başlatılıyor: ${subnetToScan}.x`);
 
     // Öncelikli IP'ler: Bunlar taramanın en başında denenecek
-    const priorityOctets = [1, 116, 100, 200, 10, 50, 101, 150];
+    const priorityOctets = [182, 1, 116, 100, 200, 10, 50, 101, 150];
     const allOctets = Array.from({ length: 254 }, (_, i) => i + 1);
     const scanOrder = [...new Set([...priorityOctets, ...allOctets])];
 
-    const chunkSize = 30; // 30 paralel sorgu
+    // Optimize Edilmiş Değerler:
+    const timeout = 3000;
+    const chunkSize = 30;
+
     for (let i = 0; i < scanOrder.length; i += chunkSize) {
       const currentChunk = scanOrder.slice(i, i + chunkSize);
       const promises = [];
@@ -366,6 +480,7 @@ export class ModbusService {
           promises.push(new Promise((resolve) => {
             let isResolved = false;
             let socket = null;
+            let timer = null;
 
             const cleanup = () => {
               if (isResolved) return;
@@ -377,14 +492,29 @@ export class ModbusService {
               resolve();
             };
 
-            const timer = setTimeout(cleanup, timeout);
+            timer = setTimeout(cleanup, timeout);
 
             try {
               socket = TcpSocket.createConnection({ host: ip, port: port }, () => {
+                // TCP BAĞLANDI -> Şimdi Modbus ile "Ping" atalım (Gerçek cihaz mı?)
+                try {
+                  const pingBuffer = (port === 502)
+                    ? Buffer.from([0, 1, 0, 0, 0, 6, 1, 3, 0, 7, 0, 1]) // Standard TCP
+                    : buildModbusMessage(1, 3, 7, 1);                  // RTU over TCP
+
+                  socket.write(pingBuffer);
+                } catch (e) { cleanup(); }
+              });
+
+              socket.on('data', (data) => {
                 if (!isResolved) {
-                  console.log(`[MODBUS_SCAN] ✨ Cihaz Bulundu: ${ip}:${port}`);
-                  foundDevices.push({ ip, port, name: `WiFi Cihaz (${ip})` });
-                  cleanup();
+                  // Yanıt plausibility kontrolü (FC 3 veya Error 0x83 gelmeli)
+                  const funcCode = (port === 502) ? data[7] : data[1];
+                  if (funcCode === 3 || funcCode === 0x83) {
+                    console.log(`[MODBUS_SCAN] ✨ GERÇEK Cihaz Bulundu: ${ip}:${port}`);
+                    foundDevices.push({ ip, port, name: `WiFi Cihaz (${ip})` });
+                    cleanup();
+                  }
                 }
               });
 
@@ -404,6 +534,58 @@ export class ModbusService {
 
     console.log(`[MODBUS_SCAN] ✅ Tarama Bitti. Toplam ${foundDevices.length} cihaz bulundu.`);
     return foundDevices;
+  }
+
+  /**
+   * AKILLI TARAMA: En yaygın ESP32/Modem ağ bloklarını sırayla tarar.
+   * Kullanıcı IP girmekle uğraşmaz.
+   */
+  static async smartScan(onProgress) {
+    // Taranacak mahallelerin listesi (Önem sırasına göre)
+    const targetSubnets = [
+      '192.168.137', // 1. Öncelik: Windows Hotspot (Senin şu anki durumun)
+      '192.168.1',   // 2. Öncelik: Ev/Ofis Modemleri
+      '192.168.4',   // 3. Öncelik: ESP32'nin kendi yayını (AP Modu)
+      '192.168.0'    // 4. Öncelik: Bazı eski modemler
+    ];
+
+    let allFoundDevices = [];
+    console.log("[SMART_SCAN] 🧠 Akıllı Tarama Başlatıldı...");
+
+    // Her bir ağ bloğunu sırayla gez
+    for (let i = 0; i < targetSubnets.length; i++) {
+      const subnet = targetSubnets[i];
+
+      // İlerleme çubuğu hesabı (Örn: 4 ağ varsa her biri %25 yer kaplar)
+      const baseProgress = i / targetSubnets.length;
+      const stepSize = 1 / targetSubnets.length;
+
+      try {
+        // Senin yazdığın mevcut fonksiyonu çağırıyoruz
+        const found = await this.scanNetwork(subnet, (subnetProgress) => {
+          // Toplam ilerlemeyi hesapla ve UI'ya gönder
+          if (onProgress) {
+            const totalProgress = baseProgress + (subnetProgress * stepSize);
+            onProgress(totalProgress);
+          }
+        });
+
+        if (found && found.length > 0) {
+          // Mükerrer kayıtları önlemek için kontrol
+          found.forEach(device => {
+            if (!allFoundDevices.some(d => d.ip === device.ip)) {
+              allFoundDevices.push(device);
+            }
+          });
+        }
+      } catch (error) {
+        console.log(`[SMART_SCAN] ${subnet} taranırken atlandı.`);
+      }
+    }
+
+    console.log(`[SMART_SCAN] ✅ Bitti. Toplam ${allFoundDevices.length} cihaz bulundu.`);
+    if (onProgress) onProgress(1); // %100 yap
+    return allFoundDevices;
   }
 
   async safeTeardown(isManual = true) {
@@ -466,8 +648,10 @@ export class ModbusService {
   async readRegister(address, count = 1) { return this.sendCommand(3, address, count); }
   async writeRegister(address, value) { return this.sendCommand(6, address, null, [value]); }
   async writeRegisters(address, values) { return this.sendCommand(16, address, null, values); }
+
   async zero() { return this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.ZERO], false, true); }
   async tare() { return this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.TARE], false, true); }
+  async clearTare() { return this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.TARE], false, true); }
 
 
   // --- DEVICE INFO ---
