@@ -10,9 +10,12 @@
     "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.esitelektronik.loadcellapp",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "Uygulamanın Bluetooth cihazlarını bulup bağlanabilmesi için izne ihtiyacı var.",
-        "NSBluetoothPeripheralUsageDescription": "Uygulamanın Bluetooth cihazlarını bulup bağlanabilmesi için izne ihtiyacı var."
+        "NSBluetoothAlwaysUsageDescription": "Uygulamanın Bluetooth terazileri bulup bağlanabilmesi için izne ihtiyacı var.",
+        "NSBluetoothPeripheralUsageDescription": "Uygulamanın Bluetooth terazileri bulup bağlanabilmesi için izne ihtiyacı var.",
+        "NSLocalNetworkUsageDescription": "Uygulamanın WiFi ağındaki terazileri bulup bağlanabilmesi için yerel ağ erişimine ihtiyacı var.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -21,7 +24,12 @@
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "package": "com.anonymous.myapp",
+      "usesCleartextTraffic": true,
       "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
         "BLUETOOTH",
         "BLUETOOTH_ADMIN",
         "BLUETOOTH_SCAN",
@@ -32,6 +40,7 @@
     },
     "plugins": [
       "expo-router",
+      "@config-plugins/react-native-ble-plx",
       [
         "expo-splash-screen",
         {
@@ -44,6 +53,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "34b4581c-59cd-43a8-a285-d1db286c4386"
+      }
+    },
+    "owner": "samettelci"
   }
 }
