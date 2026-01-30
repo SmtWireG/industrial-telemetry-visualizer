@@ -275,11 +275,9 @@ export const REGISTERS = {
 
   STATUS: 7,            // Durum (okunabilir)
 
-  DISPLAY_VALUE: 8,     // Ekran Değeri
-
-  TARE_VALUE: 12,       // Dara Değeri
-
-  GROSS_VALUE: 16,      // Brüt Değer
+  DISPLAY_VALUE: 8,     // Ekran Değeri (32 Bit)
+  TARE_VALUE: 10,       // Dara Değeri (32 Bit)
+  GROSS_VALUE: 12,      // Brüt Değer (32 Bit)
 
   TARE_INTERNAL: 16,    // Dara (İç)
 
@@ -412,11 +410,9 @@ export const STATUS_BITS = {
 
 
 // Durum Kontrolü
-
 export const checkStatus = (statusValue, bitPosition) => {
-
-  return (statusValue & (1 << (bitPosition - 1))) !== 0;
-
+  // Cihaz dökümanındaki BIT 0-15 standardına uygun olarak (0-indexed)
+  return (statusValue & (1 << bitPosition)) !== 0;
 };
 
 

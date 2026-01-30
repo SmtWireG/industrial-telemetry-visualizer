@@ -88,16 +88,33 @@ export default function SettingsScreen() {
 
     // Modbus Service'ini cihaz ID ile ayarla
     useEffect(() => {
-        if (deviceId) {
-            const isTCP = modbusService.transport === 'TCP';
+        const isTCP = modbusService.transport === 'TCP';
+        if (deviceId || isTCP) {
             console.log('✓ Settings ekranı - modbusService.device mevcut mu?', !!modbusService.device, '| Transport:', modbusService.transport);
 
             if (!modbusService.device && !isTCP) {
                 console.error('❌ Settings ekranında device objesi yok! Details ekranından geçiş yapılmalı.');
                 Alert.alert('Hata', 'Lütfen önce Details ekranından cihaza bağlanın.');
+                return;
             }
+
+            // Mevcut kablosuz modu oku
+            fetchWirelessMode();
         }
     }, [deviceId]);
+
+    const fetchWirelessMode = async () => {
+        try {
+            const res = await modbusService.readRegister(48, 1);
+            if (res && res.registers) {
+                setWirelessType(res.registers[0]);
+            }
+        } catch (e) {
+            console.warn("Kablosuz mod okunamadı:", e.message);
+            // Eğer TCP ise zaten Wifi modundadır
+            if (modbusService.transport === 'TCP') setWirelessType(2);
+        }
+    };
 
     // UI STATE
     const [expandedSection, setExpandedSection] = useState(null);
@@ -175,18 +192,23 @@ export default function SettingsScreen() {
         setIpModalVisible(false);
         setLoading(true);
         try {
-            const trimmedIp = ipAddress.trim();
+            const trimmedIp = ipAddress.toString().trim();
             const numericPort = parseInt(port) || 502;
             console.log(`[SETTINGS_SCREEN] TCP Geçişi başlatılıyor -> ${trimmedIp}:${numericPort}`);
+
             // Önce BLE'yi pasif kapat
             await modbusService.safeTeardown(false);
 
-            // Sonra TCP ile bağlan
-            const result = await modbusService.connectTCP(trimmedIp, numericPort);
+            // KRİTİK: Cihazın WiFi'ye bağlanması ve IP alması için 3 saniye bekle
+            // Bu bekleme süresi olmazsa "Host unreachable" hatası alınır.
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Sonra TCP ile bağlan (Bu aşamada 10 deneme yapacak)
+            const result = await modbusService.connectTCP(trimmedIp, numericPort, 10);
             if (result.success) {
                 modbusService.isTransitioningToWiFi = false; // Geçiş tamamlandı
                 Alert.alert("✓ Başarılı", "WiFi üzerinden TCP bağlantısı kuruldu. Tartım ekranına dönülüyor.");
-                router.replace({ pathname: "/details", params: { deviceId, deviceName: "WiFi Cihazı", transport: "TCP", ip: ipAddress } });
+                router.replace({ pathname: "/details", params: { deviceId, deviceName: "WiFi Cihazı", transport: "TCP", ip: trimmedIp } });
             }
         } catch (err) {
             console.error("❌ TCP Geçiş Hatası:", err);
@@ -199,6 +221,87 @@ export default function SettingsScreen() {
 
     // Yardımcı: Register Yazma (GUI için)
     const writeRegisterUI = async (address, value, is32Bit = false) => {
+        const isTCP = modbusService.transport === 'TCP';
+
+        // ÖZEL DURUM: Kablosuz mod değişikliği (Adres 48)
+        if (address === 48) {
+            if (isTCP && value === 1) { // WiFi'den BLE'ye geçiş
+                Alert.alert(
+                    "Kablosuz Mod Değişimi",
+                    "Cihaz Bluetooth moduna geçirilecek. Mevcut WiFi bağlantısı kesilecek ve uygulama ana ekrana dönecektir. Onaylıyor musunuz?",
+                    [
+                        { text: "İptal", style: "cancel" },
+                        {
+                            text: "Evet, Değiştir",
+                            onPress: async () => {
+                                try {
+                                    setLoading(true);
+                                    await modbusService.writeRegister(48, 1);
+                                    // 2 saniye bekle cihazın modu değişsin
+                                    setTimeout(() => {
+                                        modbusService.safeTeardown(true);
+                                        router.replace('/');
+                                        Alert.alert("Başarılı", "Cihaz BLE moduna alındı. Lütfen BLE ile tekrar tarama yapın.");
+                                    }, 2000);
+                                } catch (e) {
+                                    Alert.alert("Hata", "Mod değiştirilemedi: " + e.message);
+                                } finally {
+                                    setLoading(false);
+                                }
+                            }
+                        }
+                    ]
+                );
+                return;
+            } else if (value === 2) { // Wifi seçiliyse (Geçiş olsun veya olmasın)
+                if (!ssid || !password) {
+                    Alert.alert("Hata", "Lütfen önce WiFi adı (SSID) ve şifresini kaydedin.");
+                    setWirelessType(1); // Geri al
+                    return;
+                }
+
+                // Eğer zaten TCP ise doğrudan modal aç
+                if (isTCP) {
+                    setIpModalVisible(true);
+                    return;
+                }
+
+                Alert.alert(
+                    "Kablosuz Mod Değişimi",
+                    "Cihaz WiFi moduna bağlanmaya çalışacak. Bluetooth bağlantısı kesilecektir. Devam edilsin mi?",
+                    [
+                        { text: "İptal", style: "cancel" },
+                        {
+                            text: "Evet, Başlat",
+                            onPress: async () => {
+                                try {
+                                    setLoading(true);
+                                    modbusService.isTransitioningToWiFi = true;
+                                    await modbusService.writeRegister(48, 2);
+
+                                    Alert.alert(
+                                        "İşlem Başlatıldı",
+                                        "Cihaz WiFi moduna geçiyor. Bağlantı için IP adresi ve port bilgilerini girin.",
+                                        [{
+                                            text: "IP Gir", onPress: () => {
+                                                setIpModalVisible(true);
+                                            }
+                                        }]
+                                    );
+                                } catch (e) {
+                                    modbusService.isTransitioningToWiFi = false;
+                                    Alert.alert("Hata", "Mod değiştirilemedi: " + e.message);
+                                } finally {
+                                    setLoading(false);
+                                }
+                            }
+                        }
+                    ]
+                );
+                return;
+            }
+        }
+
         setLoading(true);
         try {
             if (is32Bit) {
@@ -317,14 +420,41 @@ export default function SettingsScreen() {
                         <SubHeader title="1.3 Kablosuz" isOpen={subSectionState.kablosuz} onToggle={() => toggleSub('kablosuz')} />
                         {subSectionState.kablosuz && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="1.3 Kablosuz Tip" value={wirelessType} options={OPTIONS.wirelessType} onSelect={setWirelessType} onSet={() => writeRegisterUI(48, wirelessType)} openModal={openModal} />
+                                {modbusService.transport === 'TCP' ? (
+                                    <View style={[styles.infoBox, { backgroundColor: '#E3F2FD', borderColor: '#2196F3', borderWidth: 1, marginBottom: 10 }]}>
+                                        <Text style={[styles.infoText, { color: '#0D47A1', fontWeight: 'bold' }]}>
+                                            ✓ Cihaz şu an WiFi modundadır.
+                                        </Text>
+                                    </View>
+                                ) : null}
+
+                                <DropdownRow
+                                    label="1.3 Kablosuz Tip"
+                                    value={wirelessType}
+                                    options={modbusService.transport === 'TCP'
+                                        ? OPTIONS.wirelessType.map(o => o.value === 2 ? { ...o, label: 'Wifi (Aktif)' } : o)
+                                        : OPTIONS.wirelessType
+                                    }
+                                    onSelect={setWirelessType}
+                                    onSet={() => writeRegisterUI(48, wirelessType)}
+                                    openModal={openModal}
+                                />
+
                                 {wirelessType === 2 && (
                                     <>
                                         <SettingRow label="SSID" value={ssid} onChange={setSsid} onSet={handleSetSSID} keyboardType="default" />
                                         <SettingRow label="Şifre" value={password} onChange={setPassword} onSet={handleSetPassword} keyboardType="default" />
                                     </>
                                 )}
-                                {wirelessType === 1 && <View style={styles.infoBox}><Text style={styles.infoText}>Şu an mobil uygulama ile bağlısınız. Ayar gerektirmez.</Text></View>}
+                                {wirelessType === 1 && (
+                                    <View style={styles.infoBox}>
+                                        <Text style={styles.infoText}>
+                                            {modbusService.transport === 'BLE'
+                                                ? "Şu an Bluetooth uygulama ile bağlısınız."
+                                                : "Bluetooth moduna geçmek için SET butonuna basın."}
+                                        </Text>
+                                    </View>
+                                )}
                             </View>
                         )}
 
@@ -650,6 +780,29 @@ export default function SettingsScreen() {
                     <View style={styles.modalContent}>
                         <Text style={styles.modalTitle}>IP Adresi Girin</Text>
                         <Text style={styles.infoText}>Cihaz ekranında görünen IP adresini yazın.</Text>
+
+                        {/* Subnet Kontrol Uyarısı */}
+                        {(() => {
+                            const hostUri = Constants.expoConfig?.hostUri || "";
+                            if (hostUri && ipAddress) {
+                                const phoneSubnet = hostUri.split(':')[0].split('.').slice(0, 3).join('.');
+                                const deviceSubnet = ipAddress.split('.').slice(0, 3).join('.');
+                                if (phoneSubnet !== deviceSubnet) {
+                                    return (
+                                        <View style={{ backgroundColor: '#FFEBEE', padding: 10, borderRadius: 10, marginTop: 10, marginBottom: 5 }}>
+                                            <Text style={{ fontSize: 11, color: '#D32F2F', fontWeight: 'bold', textAlign: 'center' }}>
+                                                ⚠️ AĞ UYUMSUZLUĞU!
+                                            </Text>
+                                            <Text style={{ fontSize: 10, color: '#D32F2F', textAlign: 'center' }}>
+                                                Telefon: {phoneSubnet}.x | Cihaz: {deviceSubnet}.x
+                                            </Text>
+                                        </View>
+                                    );
+                                }
+                            }
+                            return null;
+                        })()}
+
                         <Text style={{ fontSize: 12, color: '#666', marginBottom: 2, marginTop: 10 }}>IP Adresi:</Text>
                         <TextInput
                             style={styles.modalInput}
