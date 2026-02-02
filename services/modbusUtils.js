@@ -275,11 +275,9 @@ export const REGISTERS = {
 
   STATUS: 7,            // Durum (okunabilir)
 
-  DISPLAY_VALUE: 8,     // Ekran Değeri
-
-  TARE_VALUE: 12,       // Dara Değeri
-
-  GROSS_VALUE: 16,      // Brüt Değer
+  DISPLAY_VALUE: 8,     // Ekran Değeri (32 Bit)
+  TARE_VALUE: 10,       // Dara Değeri (32 Bit)
+  GROSS_VALUE: 12,      // Brüt Değer (32 Bit)
 
   TARE_INTERNAL: 16,    // Dara (İç)
 
@@ -300,8 +298,6 @@ export const REGISTERS = {
   DATA_BIT: 37,         // Veri Biti
 
   PARITY: 38,           // Eşlik
-
-  PERIOD: 39,           // Periyot
 
   USB_MODE: 46,         // USB Modu
 
@@ -358,13 +354,25 @@ export const REGISTERS = {
   RELAY1_DIRECTION: 79, // Röle 1 Set Yönü
 
   RELAY1_ON_DELAY: 80,  // Röle 1 Açma Gecikmesi
-
   RELAY1_OFF_DELAY: 81, // Röle 1 Kapatma Gecikmesi
 
+  RELAY2_CONTROL: 82,   // Röle 2 Kontrol
+  RELAY2_SET: 83,       // Röle 2 Set Değeri
+  RELAY2_HYSTERESIS: 85,// Röle 2 Histerisis
+  RELAY2_DIRECTION: 87, // Röle 2 Set Yönü
+  RELAY2_ON_DELAY: 88,  // Röle 2 Açma Gecikmesi
+  RELAY2_OFF_DELAY: 89, // Röle 2 Kapatma Gecikmesi
+
+  ANALOG_MAX_LOAD: 91,  // Analog Maks Yük
+  ANALOG_MIN_LOAD: 93,  // Analog Min Yük
+  ANALOG_MAX_MA: 95,    // Analog Maks mA
+  ANALOG_MIN_MA: 97,    // Analog Min mA
+  ANALOG_MAX_V: 124,    // Analog Maks V
+  ANALOG_MIN_V: 126,    // Analog Min V
+
   SERIAL_NUMBER: 128,   // Seri Numarası
-
-  FIRMWARE_VERSION: 130 // Yazılım Sürümü
-
+  FIRMWARE_VERSION: 130, // Yazılım Sürümü
+  PASSWORD_VALUE: 137   // Şifre Değeri (32 Bit)
 };
 
 
@@ -412,11 +420,9 @@ export const STATUS_BITS = {
 
 
 // Durum Kontrolü
-
 export const checkStatus = (statusValue, bitPosition) => {
-
-  return (statusValue & (1 << (bitPosition - 1))) !== 0;
-
+  // Cihaz dökümanındaki BIT 0-15 standardına uygun olarak (0-indexed)
+  return (statusValue & (1 << bitPosition)) !== 0;
 };
 
 
