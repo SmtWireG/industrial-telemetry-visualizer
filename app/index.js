@@ -40,15 +40,18 @@ export default function HomeScreen() {
   const router = useRouter();
 
   useEffect(() => {
-    // Metro IP üzerinden subnet tahmini
-    const hostUri = Constants.expoConfig?.hostUri || "";
-    if (hostUri.includes('.')) {
-      const parts = hostUri.split(':')[0].split('.');
-      if (parts.length === 4) {
-        const detectedSubnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
-        console.log(`[UI] Metro IP üzerinden tespit edilen ağ: ${detectedSubnet}.x`);
-        // Sadece varsayılan değerdeyse veya çok büyük fark varsa güncelle
-        setSubnet(prev => (prev === "192.168.1" ? detectedSubnet : prev));
+    // Metro IP üzerinden subnet tahmini (Sadece development modunda çalışır)
+    const hostUri = Constants.expoConfig?.hostUri || Constants.experienceUrl || "";
+    if (hostUri && hostUri.includes('.')) {
+      try {
+        const parts = hostUri.split(':')[0].split('.');
+        if (parts.length === 4) {
+          const detectedSubnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
+          console.log(`[UI] Ağ tespit edildi: ${detectedSubnet}.x`);
+          setSubnet(prev => (prev === "192.168.1" ? detectedSubnet : prev));
+        }
+      } catch (e) {
+        console.warn("Ağ tespiti yapılamadı:", e.message);
       }
     }
 
@@ -483,7 +486,7 @@ export default function HomeScreen() {
       {/* Teşhis Bilgisi */}
       <View style={styles.diagnosisBar}>
         <Text style={styles.diagnosisText}>
-          Metro IP: {Constants.expoConfig?.hostUri || '---'} | Hedef: {subnet}.x
+          {Constants.expoConfig?.hostUri ? `Metro IP: ${Constants.expoConfig.hostUri}` : `Uygulama Modu: Standalone (APK)`} | Tarama: {subnet}.x
         </Text>
       </View>
 
@@ -539,7 +542,7 @@ const styles = StyleSheet.create({
   modalContent: { width: '85%', backgroundColor: '#fff', borderRadius: 20, padding: 25, alignItems: 'center' },
   modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 10 },
   modalInfo: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 20 },
-  modalInput: { width: '100%', borderWidth: 1, borderColor: '#ddd', borderRadius: 10, padding: 15, fontSize: 18, textAlign: 'center', backgroundColor: '#f9f9f9', marginBottom: 15 },
+  modalInput: { width: '100%', borderWidth: 1, borderColor: '#ddd', borderRadius: 10, padding: 15, fontSize: 18, textAlign: 'center', backgroundColor: '#f9f9f9', marginBottom: 15, color: '#000' },
   modalInfoBox: { backgroundColor: '#FFF9C4', padding: 10, borderRadius: 10, marginBottom: 20 },
   infoBoxText: { fontSize: 12, color: '#F57F17', textAlign: 'center' },
   modalButtons: { flexDirection: 'row', gap: 10, width: '100%' },

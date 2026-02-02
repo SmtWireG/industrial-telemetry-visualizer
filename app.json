@@ -24,7 +24,6 @@
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "package": "com.anonymous.myapp",
-      "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
@@ -41,6 +40,14 @@
     "plugins": [
       "expo-router",
       "@config-plugins/react-native-ble-plx",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
       [
         "expo-splash-screen",
         {

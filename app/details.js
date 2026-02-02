@@ -384,8 +384,11 @@ export default function WeightScreen() {
 
             <TouchableOpacity
               style={{ marginTop: 20 }}
-              onPress={() => {
+              onPress={async () => {
+                console.log("🔙 Kullanıcı bağlantıyı iptal etti, geri dönülüyor...");
                 modbusService.isTransitioningToWiFi = false;
+                modbusService.isConnecting = false; // Döngüyü kır
+                await teardownConnection(true);
                 router.replace('/');
               }}
             >
@@ -482,17 +485,6 @@ export default function WeightScreen() {
         <Text style={styles.unitText}>{unit}</Text>
       </View>
 
-      {/* Durum Mesajları Listesi */}
-      {statusMessages.length > 0 && (
-        <View style={{ marginBottom: 20, alignItems: 'center', width: '90%' }}>
-          {statusMessages.map((msg, idx) => (
-            <Text key={idx} style={{ color: msg.includes('⚠️') ? '#FF9800' : msg.includes('❌') ? '#F44336' : '#666', fontSize: 13, fontWeight: '500', marginBottom: 2 }}>
-              {msg}
-            </Text>
-          ))}
-        </View>
-      )}
-
       <View style={styles.controlPanel}>
         <View style={styles.buttonRow}>
           <TouchableOpacity style={[styles.actionButton, { backgroundColor: '#FF9800' }]} onPress={() => modbusService.zero()}>
@@ -515,11 +507,20 @@ export default function WeightScreen() {
           <Text style={styles.buttonText}>SETTINGS</Text>
         </TouchableOpacity>
       </View>
-      {/* Teşhis Bilgisi */}
-      <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%' }}>
+      {/* Teşhis Bilgisi & Durum Mesajları */}
+      <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%', position: 'absolute', bottom: 0 }}>
         <Text style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>
-          Tel IP (Metro): {Constants.expoConfig?.hostUri || 'Bilinmiyor'} | Mod: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
+          {Constants.expoConfig?.hostUri ? `Tel IP: ${Constants.expoConfig.hostUri}` : "Mod: Standalone (APK)"} | Bağlantı: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
         </Text>
+        {statusMessages.length > 0 && (
+          <View style={{ marginTop: 5, alignItems: 'center' }}>
+            {statusMessages.map((msg, idx) => (
+              <Text key={idx} style={{ color: msg.includes('⚠️') ? '#FF9800' : msg.includes('❌') ? '#F44336' : '#666', fontSize: 11, fontWeight: 'bold' }}>
+                {msg}
+              </Text>
+            ))}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -541,6 +542,6 @@ const styles = StyleSheet.create({
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '80%', backgroundColor: '#fff', borderRadius: 10, padding: 20, alignItems: 'center' },
   modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 15 },
-  modalInput: { borderWidth: 1, borderColor: '#ccc', borderRadius: 5, padding: 10, width: '100%', marginBottom: 20, fontSize: 18, textAlign: 'center', backgroundColor: '#f9f9f9' },
+  modalInput: { borderWidth: 1, borderColor: '#ccc', borderRadius: 5, padding: 10, width: '100%', marginBottom: 20, fontSize: 18, textAlign: 'center', backgroundColor: '#f9f9f9', color: '#000' },
   modalButton: { flex: 1, padding: 15, borderRadius: 10, alignItems: 'center' }
 });

@@ -1,8 +1,12 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
+    ActivityIndicator,
     Alert,
     FlatList,
+    Modal,
+    ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
@@ -20,10 +24,15 @@ export default function MultiWeightScreen() {
 
     const devices = JSON.parse(devicesJson || "[]");
 
+    const [profiles, setProfiles] = useState([]);
+    const [profileModalVisible, setProfileModalVisible] = useState(false);
+    const [selectedSessionId, setSelectedSessionId] = useState(null);
+
     useEffect(() => {
         const startAllConnections = async () => {
+            loadProfiles();
             for (const connDevice of devices) {
-                // Her cihaz bağlantısı arasında 1 saniye bekle (Android ağ stack'i için)
+                // Her cihaz bağlantısı arasında 1 saniye bekle
                 await connectToDevice(connDevice);
                 await new Promise(r => setTimeout(r, 1000));
             }
@@ -32,11 +41,12 @@ export default function MultiWeightScreen() {
         startAllConnections();
 
         return () => {
-            // Temizlik: Tüm bağlantıları kapat ve interval'leri durdur
+            console.log("🏃 MultiWeightScreen'den çıkılıyor, temizlik başlıyor...");
             Object.keys(sessionsRef.current).forEach(id => {
                 const session = sessionsRef.current[id];
                 if (session) {
-                    session.isTeardown = true; // Logları sustur
+                    session.isTeardown = true;
+                    session.isConnecting = false;
                     session.safeTeardown(true);
                 }
             });
@@ -65,50 +75,41 @@ export default function MultiWeightScreen() {
 
             updateDeviceState(sessionId, { status: 'Bağlı', isConnected: true });
 
-            // Veri dinleyiciyi kur
             session.onDataCallback = (data) => {
-                parseAndSetData(sessionId, data, session); // session instance'ını geçiyoruz
+                parseAndSetData(sessionId, data, session);
             };
 
-            // 1. Önce Ayarları Oku (Register 118: Nokta, 119: Birim)
-            try {
-                await session.sendCommand(3, 118, 2);
-            } catch (e) {
-                console.warn(`[MULTI] ${deviceInfo.name} settings error:`, e.message);
-            }
+            // Önce Ayarları Oku
+            try { await session.sendCommand(3, 118, 2); } catch (e) { }
 
-            // 2. Polling başlat (Ağırlık ve durum oku - Register 7: Status, 8-9: Weight)
             let isActive = true;
             const poll = async () => {
                 if (!isActive || session.isTeardown) return;
                 try {
                     await session.sendCommand(3, 7, 3);
                 } catch (e) {
-                    // Bağlantı koptuysa yeniden bağlanmayı dene
+                    if (session.isTeardown) return;
                     if (e.message.includes("Socket null") || e.message.includes("mevcut değil")) {
-                        console.log(`[MULTI] ${deviceInfo.name} bağlantısı koptu, yeniden deneniyor...`);
                         updateDeviceState(sessionId, { status: 'Yeniden Bağlanıyor...', isConnected: false });
                         try {
                             await session.connectTCP(deviceInfo.ip, deviceInfo.port);
                             updateDeviceState(sessionId, { status: 'Bağlı', isConnected: true });
-                        } catch (reconnectErr) {
-                            // Yeniden bağlanamazsa bir sonraki turda veya manuel müdahalede denenecektir
+                        } catch (re) {
+                            if (!session.isTeardown) updateDeviceState(sessionId, { status: 'Bağlantı Kesildi', isConnected: false });
                         }
-                    } else if (!session.isTeardown) {
-                        console.warn(`[MULTI] ${deviceInfo.name} poll error:`, e.message);
                     }
                 }
-
                 if (isActive && !session.isTeardown) {
-                    const timeoutId = setTimeout(poll, 400);
-                    intervalsRef.current[sessionId] = timeoutId;
+                    const tId = setTimeout(poll, 400);
+                    intervalsRef.current[sessionId] = tId;
                 }
             };
             poll();
 
         } catch (error) {
-            console.error(`[MULTI] ${deviceInfo.name} error:`, error);
-            updateDeviceState(sessionId, { status: 'Hata: ' + error.message, isConnected: false });
+            if (!session.isTeardown) {
+                updateDeviceState(sessionId, { status: 'Hata', isConnected: false });
+            }
         }
     };
 
@@ -121,7 +122,6 @@ export default function MultiWeightScreen() {
             const dataOffset = isStandardTCP ? 9 : 3;
             const byteCount = isStandardTCP ? data[8] : data[2];
 
-            // DURUM 1: AYARLAR (Nokta ve Birim) - 2 register 4 byte
             if (byteCount === 4) {
                 const dotVal = (data[dataOffset] << 8) | data[dataOffset + 1];
                 const unitCode = (data[dataOffset + 2] << 8) | data[dataOffset + 3];
@@ -130,105 +130,115 @@ export default function MultiWeightScreen() {
                     dot: (dotVal >= 0 && dotVal <= 5) ? dotVal : 0,
                     unit: unitMap[unitCode] || 'kg'
                 });
-                return;
-            }
-
-            // DURUM 2: AĞIRLIK VERİSİ - 3 register 6 byte
-            if (byteCount >= 6) {
+            } else if (byteCount >= 6) {
                 const status = (data[dataOffset] << 8) | data[dataOffset + 1];
                 const isStable = (status & (1 << 6)) !== 0;
-                const hasTare = (status & (1 << 10)) !== 0; // TARE_EXIST bit 10
-
+                const hasTare = (status & (1 << 10)) !== 0;
                 const highWord = (data[dataOffset + 2] << 8) | data[dataOffset + 3];
                 const lowWord = (data[dataOffset + 4] << 8) | data[dataOffset + 5];
-
-                // JS Bitwise operators zaten 32-bit signed sonuç üretir.
                 const rawValue = (highWord << 16) | lowWord;
 
-                // State'deki güncel nokta ve birim bilgisini alalım
                 setDeviceStates(prev => {
-                    const deviceState = prev[id] || {};
-                    const currentDot = deviceState.dot || 0;
-                    const formatted = (rawValue / Math.pow(10, currentDot)).toFixed(currentDot);
-
-                    return {
-                        ...prev,
-                        [id]: {
-                            ...deviceState,
-                            weight: formatted,
-                            isStable,
-                            hasTare,
-                            status: 'Aktif'
-                        }
-                    };
+                    const ds = prev[id] || {};
+                    const dot = ds.dot || 0;
+                    const formatted = (rawValue / Math.pow(10, dot)).toFixed(dot);
+                    return { ...prev, [id]: { ...ds, weight: formatted, isStable, hasTare, status: 'Aktif' } };
                 });
             }
-        } catch (e) {
-            console.error("[MULTI_PARSE] Error:", e);
+        } catch (e) { }
+    };
+
+    const loadProfiles = async () => {
+        try {
+            const stored = await AsyncStorage.getItem('settings_profiles');
+            if (stored) setProfiles(JSON.parse(stored));
+        } catch (e) { }
+    };
+
+    const handleApplyProfile = async (profile) => {
+        const sessionId = selectedSessionId;
+        const session = sessionsRef.current[sessionId];
+        if (!session || !profile) return;
+
+        setProfileModalVisible(false);
+        updateDeviceState(sessionId, { applyingProfile: true, profileProgress: 0 });
+
+        try {
+            await session.applyProfileData(profile.data, (progress) => {
+                updateDeviceState(sessionId, { profileProgress: Math.round(progress * 100) });
+            });
+            Alert.alert("✓ Başarılı", `${profile.name} başarıyla uygulandı.`);
+        } catch (error) {
+            Alert.alert("❌ Hata", `Profil uygulanamadı: ${error.message}`);
+        } finally {
+            updateDeviceState(sessionId, { applyingProfile: false });
         }
     };
 
     const updateDeviceState = (id, newState) => {
-        setDeviceStates(prev => ({
-            ...prev,
-            [id]: { ...(prev[id] || {}), ...newState }
-        }));
+        setDeviceStates(prev => ({ ...prev, [id]: { ...(prev[id] || {}), ...newState } }));
     };
 
     const handleCommand = async (id, cmd) => {
         const session = sessionsRef.current[id];
         if (!session) return;
-
         try {
             if (cmd === 'ZERO') await session.zero();
             if (cmd === 'TARE') {
                 const state = deviceStates[id] || {};
-                if (state.hasTare) {
-                    await session.clearTare();
-                } else {
-                    await session.tare();
-                }
+                state.hasTare ? await session.clearTare() : await session.tare();
             }
-        } catch (error) {
-            Alert.alert("Komut Hatası", error.message);
-        }
+        } catch (e) { Alert.alert("Hata", e.message); }
     };
 
     const renderDeviceCard = ({ item }) => {
         const state = deviceStates[item.id] || { status: 'Bekliyor...', weight: '---' };
+        const isError = state.status?.includes('Hata') || state.status?.includes('Kesildi');
+
         return (
-            <View style={styles.card}>
+            <View style={[styles.card, isError && styles.errorCard]}>
                 <View style={styles.cardHeader}>
-                    <Text style={styles.deviceName}>{item.name}</Text>
-                    <View style={[styles.statusDot, { backgroundColor: state.isConnected ? '#4CAF50' : '#F44336' }]} />
+                    <Text style={styles.deviceName} numberOfLines={1}>{item.name}</Text>
+                    <View style={[styles.statusDot, { backgroundColor: state.isConnected ? '#4CAF50' : (isError ? '#F44336' : '#CCC') }]} />
                 </View>
 
-                <View style={styles.weightContainer}>
-                    <Text style={styles.weightText}>{state.weight}</Text>
-                    <Text style={styles.unitText}>{state.unit || 'kg'}</Text>
-                </View>
-
-                <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Durum:</Text>
-                    <Text style={[styles.infoValue, { color: state.isStable ? '#4CAF50' : '#FF9800' }]}>
-                        {state.isStable ? "STABİL" : "HAREKETLİ"}
-                    </Text>
-                </View>
-
-                <View style={styles.buttonRow}>
-                    <TouchableOpacity
-                        style={[styles.miniBtn, { backgroundColor: '#FF9800' }]}
-                        onPress={() => handleCommand(item.id, 'ZERO')}
-                    >
-                        <Text style={styles.miniBtnText}>ZERO</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                        style={[styles.miniBtn, { backgroundColor: '#2196F3' }]}
-                        onPress={() => handleCommand(item.id, 'TARE')}
-                    >
-                        <Text style={styles.miniBtnText}>{state.hasTare ? "DARA İPTAL" : "TARE"}</Text>
-                    </TouchableOpacity>
-                </View>
+                {isError ? (
+                    <View style={styles.errorContainer}>
+                        <Text style={styles.errorTitle}>BAĞLANTI YOK</Text>
+                        <TouchableOpacity style={styles.retryBtn} onPress={() => connectToDevice(item)}>
+                            <Text style={styles.retryBtnText}>TEKRAR BAĞLAN</Text>
+                        </TouchableOpacity>
+                    </View>
+                ) : (
+                    <>
+                        <View style={styles.weightContainer}>
+                            <Text style={styles.weightText}>{state.weight}</Text>
+                            <Text style={styles.unitText}>{state.unit || 'kg'}</Text>
+                        </View>
+                        <View style={styles.infoRow}>
+                            <Text style={[styles.infoValue, { color: state.isStable ? '#4CAF50' : '#FF9800' }]}>
+                                {state.isStable ? "STABİL" : "HAREKETLİ"}
+                            </Text>
+                        </View>
+                        <View style={styles.buttonRow}>
+                            <TouchableOpacity style={[styles.miniBtn, { backgroundColor: '#FF9800' }]} onPress={() => handleCommand(item.id, 'ZERO')}>
+                                <Text style={styles.miniBtnText}>ZERO</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.miniBtn, { backgroundColor: '#2196F3' }]} onPress={() => handleCommand(item.id, 'TARE')}>
+                                <Text style={styles.miniBtnText}>{state.hasTare ? "DARA İPT" : "DARA"}</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.miniBtn, { backgroundColor: '#9C27B0' }]} onPress={() => { setSelectedSessionId(item.id); setProfileModalVisible(true); }}>
+                                <Text style={styles.miniBtnText}>PRF</Text>
+                            </TouchableOpacity>
+                        </View>
+                        {state.applyingProfile && (
+                            <View style={styles.progressOverlay}>
+                                <ActivityIndicator size="small" color="#fff" />
+                                <Text style={styles.progressText}>%{state.profileProgress || 0}</Text>
+                            </View>
+                        )}
+                    </>
+                )}
             </View>
         );
     };
@@ -236,10 +246,8 @@ export default function MultiWeightScreen() {
     return (
         <View style={styles.container}>
             <View style={styles.topBar}>
-                <TouchableOpacity onPress={() => router.back()}>
-                    <Text style={styles.backText}>‹ Geri</Text>
-                </TouchableOpacity>
-                <Text style={styles.topTitle}>Çoklu Tartım Takibi</Text>
+                <TouchableOpacity onPress={() => router.back()}><Text style={styles.backText}>‹ Geri</Text></TouchableOpacity>
+                <Text style={styles.topTitle}>Çoklu Tartım</Text>
                 <View style={{ width: 40 }} />
             </View>
 
@@ -250,12 +258,31 @@ export default function MultiWeightScreen() {
                 numColumns={2}
                 contentContainerStyle={styles.listContent}
             />
+
+            <Modal visible={profileModalVisible} transparent animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>Profil Seçin</Text>
+                        <ScrollView style={{ width: '100%', maxHeight: 300, marginVertical: 15 }}>
+                            {profiles.length > 0 ? profiles.map(p => (
+                                <TouchableOpacity key={p.id} style={styles.profileItem} onPress={() => handleApplyProfile(p)}>
+                                    <Text style={styles.profileItemText}>{p.name}</Text>
+                                    <Text style={styles.profileItemAction}>Yükle ›</Text>
+                                </TouchableOpacity>
+                            )) : <Text style={{ textAlign: 'center', color: '#999' }}>Kayıtlı profil yok.</Text>}
+                        </ScrollView>
+                        <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setProfileModalVisible(false)}>
+                            <Text style={styles.modalCloseBtnText}>Kapat</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
         </View>
     );
 }
 
 const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#f5f7fa' },
+    container: { flex: 1, backgroundColor: '#F5F7FA' },
     topBar: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingTop: 50, paddingBottom: 20, paddingHorizontal: 20,
@@ -263,22 +290,45 @@ const styles = StyleSheet.create({
     },
     backText: { fontSize: 18, color: '#2196F3', fontWeight: 'bold' },
     topTitle: { fontSize: 18, fontWeight: 'bold', color: '#333' },
-    listContent: { padding: 10 },
+    listContent: { padding: 6 },
     card: {
-        flex: 1, backgroundColor: '#fff', margin: 8, padding: 15,
-        borderRadius: 20, elevation: 4, minHeight: 180,
-        justifyContent: 'space-between'
+        flex: 1, backgroundColor: '#fff', margin: 6, padding: 12,
+        borderRadius: 15, elevation: 4, minHeight: 160,
+        justifyContent: 'space-between', overflow: 'hidden'
     },
-    cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-    deviceName: { fontSize: 14, fontWeight: 'bold', color: '#555', flex: 1 },
-    statusDot: { width: 10, height: 10, borderRadius: 5 },
-    weightContainer: { alignItems: 'center', marginVertical: 10 },
-    weightText: { fontSize: 32, fontWeight: '900', color: '#2196F3' },
-    unitText: { fontSize: 12, color: '#888' },
-    infoRow: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginBottom: 10 },
-    infoLabel: { fontSize: 10, color: '#999' },
+    cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
+    deviceName: { fontSize: 12, fontWeight: 'bold', color: '#555', flex: 1 },
+    statusDot: { width: 8, height: 8, borderRadius: 4 },
+    errorCard: { backgroundColor: '#FBE9E7' },
+    errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 5 },
+    errorTitle: { fontSize: 10, fontWeight: 'bold', color: '#D32F2F' },
+    retryBtn: { paddingVertical: 6, paddingHorizontal: 10, backgroundColor: '#D32F2F', borderRadius: 8, marginTop: 5 },
+    retryBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+    weightContainer: { alignItems: 'center', marginVertical: 5 },
+    weightText: { fontSize: 28, fontWeight: '900', color: '#2196F3' },
+    unitText: { fontSize: 10, color: '#888' },
+    infoRow: { flexDirection: 'row', justifyContent: 'center', marginBottom: 5 },
     infoValue: { fontSize: 10, fontWeight: 'bold' },
-    buttonRow: { flexDirection: 'row', gap: 10, justifyContent: 'center' },
-    miniBtn: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, flex: 1, alignItems: 'center' },
-    miniBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' }
+    buttonRow: { flexDirection: 'row', gap: 4, justifyContent: 'center' },
+    miniBtn: { paddingVertical: 6, borderRadius: 8, flex: 1, alignItems: 'center' },
+    miniBtnText: { color: '#fff', fontSize: 9, fontWeight: 'bold' },
+    modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+    modalContent: { width: '80%', backgroundColor: '#fff', borderRadius: 20, padding: 20, alignItems: 'center' },
+    modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#333' },
+    profileItem: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        padding: 12, backgroundColor: '#f8f9fa', borderRadius: 10, marginBottom: 8
+    },
+    profileItemText: { fontSize: 14, fontWeight: 'bold', color: '#333' },
+    profileItemAction: { fontSize: 12, color: '#2196F3' },
+    modalCloseBtn: { padding: 5 },
+    modalCloseBtnText: { color: '#F44336', fontWeight: 'bold' },
+    progressOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: 'rgba(0,0,0,0.7)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 10
+    },
+    progressText: { color: '#fff', fontWeight: 'bold', fontSize: 14 }
 });

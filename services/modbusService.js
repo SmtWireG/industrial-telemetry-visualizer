@@ -2,8 +2,10 @@ import { Buffer } from 'buffer';
 import TcpSocket from 'react-native-tcp-socket';
 import {
   buildModbusMessage,
+  combineInt32,
   COMMANDS,
   REGISTERS,
+  splitInt32,
   stringToRegisters
 } from './modbusUtils';
 
@@ -64,7 +66,7 @@ export class ModbusService {
   /**
    * TCP (WiFi) bağlantısını başlatır.
    */
-  async connectTCP(ip, port = 502, retryCount = 10) {
+  async connectTCP(ip, port = 502, retryCount = 5) {
     if (!ip) throw new Error("IP adresi belirtilmedi.");
     const cleanIp = ip.toString().trim();
     const cleanPort = parseInt(port) || 502;
@@ -92,7 +94,7 @@ export class ModbusService {
         return result;
       } catch (error) {
         this.isConnecting = false;
-        console.warn(`[MODBUS_SERVICE] ⚠️ Deneme ${i} Başarısız: ${error.message}`);
+        console.log(`[MODBUS_SERVICE] ℹ️ Deneme ${i} Başarısız: ${error.message}`);
 
         if (i === retryCount) {
           throw error;
@@ -113,9 +115,7 @@ export class ModbusService {
     return new Promise((resolve, reject) => {
       // Temizlik: Varsa eski bağlantıyı kapat
       if (this.tcpClient) {
-        try {
-          this.tcpClient.destroy();
-        } catch (e) { }
+        try { this.tcpClient.destroy(); } catch (e) { }
         this.tcpClient = null;
       }
 
@@ -126,36 +126,31 @@ export class ModbusService {
       let isResolved = false;
       let timer = null;
 
-      // Yerel değişken kullanımı (Race condition önleyici)
-      const client = TcpSocket.createConnection({ host: ip, port: port }, () => {
-        // Eğer zaman aşımı (timeout) çoktan çalıştıysa işlem yapma
+      const socketCreator = TcpSocket?.createConnection;
+      if (typeof socketCreator !== 'function') {
+        const err = "[MODBUS_SERVICE] ❌ TCP Modülü (Native) yüklenemedi!";
+        console.error(err);
+        reject(new Error(err));
+        return;
+      }
+
+      const client = socketCreator({ host: ip, port: port }, () => {
         if (isResolved) {
           try { client.destroy(); } catch (e) { }
           return;
         }
 
         console.log(`[MODBUS_SERVICE] ✅ TCP Bağlantısı BAŞARILI (${ip}:${port})`);
+        try { client.setNoDelay(true); } catch (err) { }
 
-        // HATA ÇÖZÜMÜ: this.tcpClient yerine direkt 'client' değişkenini kullanıyoruz
-        // Böylece this.tcpClient null olsa bile bu yerel değişken hala yaşıyordur.
-        try {
-          client.setNoDelay(true);
-        } catch (err) {
-          console.warn("[MODBUS_SERVICE] setNoDelay hatası (Önemsiz):", err.message);
-        }
-
-        // Zamanlayıcıyı iptal et
         if (timer) clearTimeout(timer);
-
         isResolved = true;
         resolve({ success: true });
       });
 
-      // Global değişkene ata
       this.tcpClient = client;
 
       client.on('data', (data) => {
-        // TCP Kaynağından geldiğini belirt
         this.handleIncomingData(Array.from(data), 'TCP');
       });
 
@@ -163,50 +158,47 @@ export class ModbusService {
         if (!isResolved) {
           isResolved = true;
           if (timer) clearTimeout(timer);
-          console.error(`[MODBUS_SERVICE] ❌ TCP Hata Mesajı: ${error.message}`);
-          reject(new Error(error.message));
+
+          let errMsg = "Bilinmeyen Soket Hatası";
+          if (error) {
+            if (typeof error === 'string') errMsg = error;
+            else if (error.message) errMsg = error.message;
+            else if (typeof error.toString === 'function') errMsg = error.toString();
+          }
+
+          if (!this.isTeardown) {
+            console.log(`[MODBUS_SERVICE] ℹ️ TCP Hata Bilgisi: ${errMsg}`);
+          }
+          reject(new Error(errMsg));
         }
 
         // KRİTİK: Bekleyen okuma varsa iptal et (Zombi temizliği)
         if (this.readResolver) {
-          this.readResolver({ success: false, error: 'Connection lost' });
+          this.readResolver({ success: false, error: error?.message || "Soket Hatası" });
           this.readResolver = null;
         }
-
-        // Hata durumunda sınıfı ve kuyruğu temizle
-        this.tcpClient = null;
-        this.transport = 'NONE';
-        this.isConnecting = false;
-        this.queue = [];
       });
 
       client.on('close', () => {
-        console.log(`[MODBUS_SERVICE] 🔌 TCP Bağlantısı Kapandı (${this.ip})`);
-
-        // KRİTİK: Bekleyen okuma varsa iptal et
-        if (this.readResolver) {
-          this.readResolver({ success: false, error: 'Connection closed' });
-          this.readResolver = null;
+        if (!this.isTeardown) {
+          console.log(`[MODBUS_SERVICE] 🔌 TCP Bağlantısı Kapandı (${ip})`);
         }
+        this.tcpClient = null;
+        this.isAuthenticated = false;
 
-        if (this.tcpClient === client) {
-          this.tcpClient = null;
-          this.transport = 'NONE';
-          this.isConnecting = false;
-          this.queue = [];
+        if (!isResolved) {
+          isResolved = true;
+          if (timer) clearTimeout(timer);
+          reject(new Error("Bağlantı kapandı."));
         }
       });
 
-      // 4 saniye timeout (Hotspot gecikmeleri için ideal süre)
+      // Zaman aşımı (4 saniye)
       timer = setTimeout(() => {
         if (!isResolved) {
           isResolved = true;
-          console.warn(`[MODBUS_SERVICE] ⚠️ Zaman aşımı (${ip})`);
-          if (client) {
-            try { client.destroy(); } catch (e) { }
-          }
-          // Burada this.tcpClient = null YAPMIYORUZ, çünkü 'close' event'i zaten yapacak.
-          // Manuel yaparsak yukarıdaki race condition oluşuyor.
+          console.log(`[MODBUS_SERVICE] ℹ️ Zaman aşımı (${ip})`);
+          if (client) { try { client.destroy(); } catch (e) { } }
           reject(new Error("Bağlantı zaman aşımı (4s)"));
         }
       }, 4000);
@@ -363,7 +355,7 @@ export class ModbusService {
           }
         }
 
-        if (!this.tcpClient) throw new Error(`TCP Bağlantısı mevcut değil (${this.ip || 'No IP'})`);
+        if (!this.tcpClient) throw new Error(`Cihaz ile bağlantı kesildi (${this.ip || 'Bağlantı Yok'})`);
       } else {
         throw new Error(`Geçersiz Transport: ${currentTransport}`);
       }
@@ -410,7 +402,16 @@ export class ModbusService {
         resolve({ success: true });
       }
     } catch (error) {
-      if (!this.isTeardown && !error.message.includes("NONE")) {
+      const isSilenceError =
+        this.isTeardown ||
+        error.message.includes("NONE") ||
+        error.message.includes("mevcut değil") ||
+        error.message.includes("kesildi") ||
+        error.message.includes("null");
+
+      if (this.isTransitioningToWiFi) {
+        console.log(`[MODBUS_SERVICE] 📡 WiFi'ye geçiş yapılıyor (Beklenen kopma): ${error.message}`);
+      } else if (!isSilenceError) {
         console.error(`[MODBUS_SERVICE] ❌ İşlem Hatası (Addr: ${startAddress}):`, error.message);
       }
       reject(error);
@@ -464,9 +465,9 @@ export class ModbusService {
     const allOctets = Array.from({ length: 254 }, (_, i) => i + 1);
     const scanOrder = [...new Set([...priorityOctets, ...allOctets])];
 
-    // Optimize Edilmiş Değerler:
-    const timeout = 3000;
-    const chunkSize = 30;
+    // Optimize Edilmiş Değerler: (Hızlandırıldı)
+    const timeout = 1000;
+    const chunkSize = 60;
 
     for (let i = 0; i < scanOrder.length; i += chunkSize) {
       const currentChunk = scanOrder.slice(i, i + chunkSize);
@@ -647,7 +648,76 @@ export class ModbusService {
   // --- Kısayol Metodları ---
   async readRegister(address, count = 1) { return this.sendCommand(3, address, count); }
   async writeRegister(address, value) { return this.sendCommand(6, address, null, [value]); }
-  async writeRegisters(address, values) { return this.sendCommand(16, address, null, values); }
+  async writeRegisters(address, values) { return this.sendCommand(16, address, values.length, values); }
+
+  /**
+   * Profil Verisini Cihaza Uygular (Toplu Yazma)
+   * @param {Object} d Profil verisi (data objesi)
+   * @param {Function} onProgress İlerleme callback (0-1 arası)
+   */
+  async applyProfileData(d, onProgress) {
+    if (!d) throw new Error("Profil verisi boş.");
+    const totalSteps = 30; // Yaklaşık adım sayısı
+    let currentStep = 0;
+
+    const tick = () => {
+      currentStep++;
+      if (onProgress) onProgress(currentStep / totalSteps);
+    };
+
+    try {
+      // 1. Haberleşme
+      await this.writeRegister(34, d.commMod); tick();
+      await this.writeRegister(35, parseInt(d.commId)); tick();
+      await this.writeRegister(36, d.baudrate); tick();
+      await this.writeRegister(37, d.dataBit); tick();
+      await this.writeRegister(38, d.parity); tick();
+
+      // 2. Röle 1
+      await this.writeRegister(74, d.r1Ctrl); tick();
+      const [r1H, r1L] = splitInt32(parseInt(d.r1Val));
+      await this.writeRegisters(75, [r1H, r1L]); tick();
+      await this.writeRegister(77, parseInt(d.r1Hyst)); tick();
+      await this.writeRegister(79, d.r1Cont); tick();
+      await this.writeRegister(80, d.r1OpenDly); tick();
+      await this.writeRegister(81, d.r1CloseDly); tick();
+
+      // 3. Röle 2
+      await this.writeRegister(82, d.r2Ctrl); tick();
+      const [r2H, r2L] = splitInt32(parseInt(d.r2Val));
+      await this.writeRegisters(83, [r2H, r2L]); tick();
+      await this.writeRegister(85, parseInt(d.r2Hyst)); tick();
+      await this.writeRegister(87, d.r2Cont); tick();
+      await this.writeRegister(88, d.r2OpenDly); tick();
+      await this.writeRegister(89, d.r2CloseDly); tick();
+
+      // 4. Cihaz Ayarları
+      const [capH, capL] = splitInt32(parseInt(d.capacity));
+      await this.writeRegisters(113, [capH, capL]); tick();
+      await this.writeRegister(115, d.zeroLimit); tick();
+      await this.writeRegister(117, parseInt(d.step)); tick();
+      await this.writeRegister(118, d.dot); tick();
+      await this.writeRegister(119, d.unit); tick();
+      await this.writeRegister(120, d.stability); tick();
+      await this.writeRegister(121, d.tareMode); tick();
+      await this.writeRegister(122, d.lang); tick();
+      await this.writeRegister(123, d.passMode); tick();
+
+      // 5. Filtreler
+      await this.writeRegister(107, d.filterType); tick();
+      await this.writeRegister(108, d.adcHz); tick();
+      await this.writeRegister(109, parseInt(d.avgCount)); tick();
+      await this.writeRegister(110, d.response); tick();
+      await this.writeRegister(111, d.vibration); tick();
+      await this.writeRegister(112, d.decisionTime); tick();
+
+      if (onProgress) onProgress(1);
+      return { success: true };
+    } catch (error) {
+      console.error("[MODBUS_SERVICE] Profil uygulama hatası:", error.message);
+      throw error;
+    }
+  }
 
   async zero() { return this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.ZERO], false, true); }
   async tare() { return this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.TARE], false, true); }
@@ -656,11 +726,19 @@ export class ModbusService {
 
   // --- DEVICE INFO ---
   async readSerialNumber() {
-    return this.readRegister(128, 2);
+    const res = await this.readRegister(REGISTERS.SERIAL_NUMBER, 2);
+    if (res.success && res.registers && res.registers.length >= 2) {
+      return combineInt32(res.registers[0], res.registers[1]);
+    }
+    return "N/A";
   }
 
   async readFirmwareVersion() {
-    return this.readRegister(130, 1);
+    const res = await this.readRegister(REGISTERS.FIRMWARE_VERSION, 1);
+    if (res.success && res.registers && res.registers.length >= 1) {
+      return res.registers[0];
+    }
+    return 0;
   }
 
   // --- CALIBRATION ---
@@ -709,7 +787,7 @@ export class ModbusService {
   }
 
   async restart() {
-    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.RESTART], true);
+    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.RESTART], false);
     this.isRebooting = true;
     return result;
   }
@@ -725,7 +803,7 @@ export class ModbusService {
   }
 
   async factoryReset() {
-    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.FACTORY_RESET], true);
+    const result = await this.sendCommand(6, REGISTERS.COMMAND, null, [COMMANDS.FACTORY_RESET], false);
     this.isRebooting = true;
     return result;
   }

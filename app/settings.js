@@ -1,8 +1,10 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import modbusService from '../services/modbusService';
+import { combineInt32, REGISTERS, splitInt32 } from '../services/modbusUtils';
 
 // --- SABİT TANIMLAMALAR ---
 const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
@@ -13,7 +15,6 @@ const OPTIONS = {
     baudrate: [{ label: '1200', value: 0 }, { label: '2400', value: 1 }, { label: '4800', value: 2 }, { label: '9600', value: 3 }, { label: '19200', value: 4 }, { label: '38400', value: 5 }, { label: '57600', value: 6 }, { label: '115200', value: 7 }],
     bit: [{ label: '7 bit', value: 0 }, { label: '8 bit', value: 1 }],
     parity: [{ label: 'Yok', value: 0 }, { label: 'Çift', value: 1 }, { label: 'Tek', value: 2 }],
-    period: [{ label: '10Hz', value: 0 }, { label: '50Hz', value: 1 }, { label: '100Hz', value: 2 }, { label: '400Hz', value: 3 }],
     usbMod: [{ label: 'Kapalı', value: 0 }, { label: 'Sürekli', value: 1 }],
     usbPeriod: [{ label: '5 Hz', value: 0 }, { label: '10 Hz', value: 1 }, { label: '15 Hz', value: 2 }, { label: '20 Hz', value: 3 }, { label: '50 Hz', value: 4 }],
     wirelessType: [{ label: 'Kapalı', value: 0 }, { label: 'Bluetooth', value: 1 }, { label: 'Wifi', value: 2 }],
@@ -97,15 +98,93 @@ export default function SettingsScreen() {
                 Alert.alert('Hata', 'Lütfen önce Details ekranından cihaza bağlanın.');
                 return;
             }
-
-            // Mevcut kablosuz modu oku
-            fetchWirelessMode();
+            // Tüm ayarları tazele
+            refreshAllSettings();
         }
     }, [deviceId]);
 
+    const [isSyncing, setIsSyncing] = useState(false);
+
+    const refreshAllSettings = async () => {
+        setLoading(true);
+        setIsSyncing(true);
+        try {
+            console.log("[SETTINGS] 🔄 Cihaz ayarları senkronize ediliyor...");
+
+            // 1. Seri Haberleşme & USB & Wireless (R34 - R48)
+            const res1 = await modbusService.readRegister(REGISTERS.COMM_MODE, 15);
+            if (res1.success && res1.registers) {
+                setCommMod(res1.registers[0]);
+                setCommId(res1.registers[1].toString());
+                setBaudrate(res1.registers[2]);
+                setDataBit(res1.registers[3]);
+                setParity(res1.registers[4]);
+                // R46, R47, R48
+                setUsbMod(res1.registers[12]);
+                setUsbPeriod(res1.registers[13]);
+                setWirelessType(res1.registers[14]);
+            }
+
+            // 2. Röle Ayarları (R74 - R81)
+            const res2 = await modbusService.readRegister(REGISTERS.RELAY1_CONTROL, 8);
+            if (res2.success && res2.registers) {
+                setR1Ctrl(res2.registers[0]);
+                setR1Val(combineInt32(res2.registers[1], res2.registers[2]).toString());
+                setR1Hyst(res2.registers[3].toString());
+                setR1Cont(res2.registers[5]);
+                setR1OpenDly(res2.registers[6]);
+                setR1CloseDly(res2.registers[7]);
+            }
+
+            // 3. Röle 2 Ayarları (R82 - R89)
+            const resRelay2 = await modbusService.readRegister(REGISTERS.RELAY2_CONTROL, 8);
+            if (resRelay2.success && resRelay2.registers) {
+                setR2Ctrl(resRelay2.registers[0]);
+                setR2Val(combineInt32(resRelay2.registers[1], resRelay2.registers[2]).toString());
+                setR2Hyst(resRelay2.registers[3].toString());
+                setR2Cont(resRelay2.registers[5]);
+                setR2OpenDly(resRelay2.registers[6]);
+                setR2CloseDly(resRelay2.registers[7]);
+            }
+
+            // 4. Filtre Ayarları (R107 - R112)
+            const res3 = await modbusService.readRegister(REGISTERS.FILTER_TYPE, 6);
+            if (res3.success && res3.registers) {
+                setFilterType(res3.registers[0]);
+                setAdcHz(res3.registers[1]);
+                setAvgCount(res3.registers[2].toString());
+                setResponse(res3.registers[3]);
+                setVibration(res3.registers[4]);
+                setDecisionTime(res3.registers[5]);
+            }
+
+            // 4. Kapasite, Nokta, Birim (R113 - R123)
+            const res4 = await modbusService.readRegister(REGISTERS.MAX_CAPACITY, 11);
+            if (res4.success && res4.registers) {
+                setCapacity(combineInt32(res4.registers[0], res4.registers[1]).toString());
+                setZeroLimit(res4.registers[2]);
+                setStep(res4.registers[4].toString());
+                setDot(res4.registers[5]);
+                setUnit(res4.registers[6]);
+                setStability(res4.registers[7]);
+                setTareMode(res4.registers[8]);
+                setLang(res4.registers[9]);
+                setPassMode(res4.registers[10]);
+            }
+
+            console.log("[SETTINGS] ✅ Senkronizasyon tamamlandı.");
+        } catch (error) {
+            console.warn("[SETTINGS] ❌ Senkronizasyon hatası:", error.message);
+            // Alert.alert("Uyarı", "Bazı ayarlar okunamadı, varsayılanlar gösteriliyor.");
+        } finally {
+            setLoading(false);
+            setIsSyncing(false);
+        }
+    };
+
     const fetchWirelessMode = async () => {
         try {
-            const res = await modbusService.readRegister(48, 1);
+            const res = await modbusService.readRegister(REGISTERS.WIRELESS_TYPE, 1);
             if (res && res.registers) {
                 setWirelessType(res.registers[0]);
             }
@@ -130,7 +209,6 @@ export default function SettingsScreen() {
     const [baudrate, setBaudrate] = useState(3);
     const [dataBit, setDataBit] = useState(1);
     const [parity, setParity] = useState(0);
-    const [period, setPeriod] = useState(2);
     const [usbMod, setUsbMod] = useState(0);
     const [usbPeriod, setUsbPeriod] = useState(1);
     const [wirelessType, setWirelessType] = useState(0);
@@ -179,6 +257,99 @@ export default function SettingsScreen() {
     const [passMode, setPassMode] = useState(0);
     const [newPass, setNewPass] = useState("111111");
 
+    // PROFILE STATES
+    const [profiles, setProfiles] = useState([]);
+    const [profileName, setProfileName] = useState("");
+    const [saveModalVisible, setSaveModalVisible] = useState(false);
+    const [isApplyingProfile, setIsApplyingProfile] = useState(false);
+
+    useEffect(() => {
+        loadProfilesFromStorage();
+    }, []);
+
+    const loadProfilesFromStorage = async () => {
+        try {
+            const stored = await AsyncStorage.getItem('settings_profiles');
+            if (stored) setProfiles(JSON.parse(stored));
+        } catch (e) { console.error("Profiller yüklenemedi:", e); }
+    };
+
+    const handleSaveProfile = async () => {
+        if (!profileName.trim()) {
+            Alert.alert("Hata", "Lütfen bir profil ismi girin.");
+            return;
+        }
+
+        const newProfile = {
+            id: Date.now().toString(),
+            name: profileName,
+            data: {
+                commMod, commId, baudrate, dataBit, parity,
+                usbMod, usbPeriod, wirelessType,
+                r1Ctrl, r1Val, r1Hyst, r1Cont, r1OpenDly, r1CloseDly,
+                r2Ctrl, r2Val, r2Hyst, r2Cont, r2OpenDly, r2CloseDly,
+                capacity, zeroLimit, dot, step, unit, stability, tareMode,
+                filterType, response, vibration, decisionTime, adcHz, avgCount,
+                lang, passMode
+            }
+        };
+
+        const updated = [...profiles, newProfile];
+        setProfiles(updated);
+        await AsyncStorage.setItem('settings_profiles', JSON.stringify(updated));
+        setSaveModalVisible(false);
+        setProfileName("");
+        Alert.alert("Başarılı", `${profileName} profili kaydedildi.`);
+    };
+
+    const handleDeleteProfile = async (id) => {
+        if (loading) return;
+        const updated = profiles.filter(p => p.id !== id);
+        setProfiles(updated);
+        await AsyncStorage.setItem('settings_profiles', JSON.stringify(updated));
+    };
+
+    const [isProcessingProfile, setIsProcessingProfile] = useState(false);
+
+    const handleApplyProfile = async (profile) => {
+        if (loading || isProcessingProfile) return;
+        Alert.alert(
+            "Profili Uygula",
+            `'${profile.name}' profilindeki tüm ayarlar cihaza yazılacaktır. Bu işlem yaklaşık 10-15 saniye sürebilir. Başlıyoruz?`,
+            [
+                { text: "Vazgeç", style: "cancel" },
+                {
+                    text: "Uygula",
+                    onPress: async () => {
+                        setLoading(true);
+                        setIsApplyingProfile(true);
+                        setIsProcessingProfile(true);
+                        try {
+                            const d = profile.data;
+                            console.log(`[PROFILES] 🔄 '${profile.name}' uygulanıyor...`);
+
+                            // Merkezi servisi kullanarak tüm ayarları yaz
+                            await modbusService.applyProfileData(d, (progress) => {
+                                // İstersen burada progress bar güncelleyebilirsin
+                                // Şimdilik loading overlay yeterli
+                            });
+
+                            Alert.alert("✓ Başarılı", "Profil başarıyla uygulandı.");
+                            // UI State'leri de güncelle
+                            await refreshAllSettings();
+                        } catch (err) {
+                            Alert.alert("❌ Hata", "Profil uygulanırken hata oluştu: " + err.message);
+                        } finally {
+                            setLoading(false);
+                            setIsApplyingProfile(false);
+                            setIsProcessingProfile(false);
+                        }
+                    }
+                }
+            ]
+        );
+    };
+
     const toggleSub = (key) => setSubSectionState(prev => ({ ...prev, [key]: !prev[key] }));
 
     const openModal = (options, callback) => {
@@ -197,6 +368,9 @@ export default function SettingsScreen() {
             console.log(`[SETTINGS_SCREEN] TCP Geçişi başlatılıyor -> ${trimmedIp}:${numericPort}`);
             // Önce BLE'yi pasif kapat
             await modbusService.safeTeardown(false);
+
+            // KRİTİK: BLE Stack'in kapanması için 500ms bekle (Crash önleyici)
+            await new Promise(r => setTimeout(r, 500));
 
             // Sonra TCP ile bağlan
             const result = await modbusService.connectTCP(trimmedIp, numericPort);
@@ -332,16 +506,16 @@ export default function SettingsScreen() {
         }
     };
 
-    // Yardımcı: 32-bit Ayırma
-    const splitInt32 = (value) => {
-        const high = (value >> 16) & 0xffff;
-        const low = value & 0xffff;
-        return [high, low];
-    };
-
     return (
         <View style={styles.container}>
-            {loading && <View style={styles.loadingOverlay}><ActivityIndicator size="large" color="#000" /></View>}
+            {loading && (
+                <View style={styles.loadingOverlay}>
+                    <ActivityIndicator size="large" color="#2196F3" />
+                    <Text style={{ marginTop: 10, fontWeight: 'bold', color: '#000' }}>
+                        {isSyncing ? "Ayarlar Senkronize Ediliyor..." : "Lütfen Bekleyin..."}
+                    </Text>
+                </View>
+            )}
             <ScrollView>
                 <AccordionHeader title="Haberleşme" sectionId="1" expandedSection={expandedSection} setExpandedSection={setExpandedSection} />
                 {expandedSection === "1" && (
@@ -349,19 +523,18 @@ export default function SettingsScreen() {
                         <SubHeader title="1.1 Seri" isOpen={subSectionState.seri} onToggle={() => toggleSub('seri')} />
                         {subSectionState.seri && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="1.1.1 Mod" value={commMod} options={OPTIONS.mod} onSelect={setCommMod} onSet={() => writeRegisterUI(34, commMod)} openModal={openModal} />
-                                {commMod === 2 && <SettingRow label="1.1.2 Cihaz ID" value={commId} onChange={setCommId} onSet={() => writeRegisterUI(35, commId)} />}
-                                <DropdownRow label="1.1.3 Hız" value={baudrate} options={OPTIONS.baudrate} onSelect={setBaudrate} onSet={() => writeRegisterUI(36, baudrate)} openModal={openModal} />
-                                <DropdownRow label="1.1.4 Bit" value={dataBit} options={OPTIONS.bit} onSelect={setDataBit} onSet={() => writeRegisterUI(37, dataBit)} openModal={openModal} />
-                                <DropdownRow label="1.1.5 Denklik" value={parity} options={OPTIONS.parity} onSelect={setParity} onSet={() => writeRegisterUI(38, parity)} openModal={openModal} />
-                                <DropdownRow label="1.1.6 Periyot" value={period} options={OPTIONS.period} onSelect={setPeriod} onSet={() => writeRegisterUI(39, period)} openModal={openModal} />
+                                <DropdownRow label="1.1.1 Mod" value={commMod} options={OPTIONS.mod} onSelect={setCommMod} onSet={() => writeRegisterUI(REGISTERS.COMM_MODE, commMod)} openModal={openModal} />
+                                {commMod === 2 && <SettingRow label="1.1.2 Cihaz ID" value={commId} onChange={setCommId} onSet={() => writeRegisterUI(REGISTERS.COMM_ID, commId)} />}
+                                <DropdownRow label="1.1.3 Hız" value={baudrate} options={OPTIONS.baudrate} onSelect={setBaudrate} onSet={() => writeRegisterUI(REGISTERS.BAUDRATE, baudrate)} openModal={openModal} />
+                                <DropdownRow label="1.1.4 Bit" value={dataBit} options={OPTIONS.bit} onSelect={setDataBit} onSet={() => writeRegisterUI(REGISTERS.DATA_BIT, dataBit)} openModal={openModal} />
+                                <DropdownRow label="1.1.5 Denklik" value={parity} options={OPTIONS.parity} onSelect={setParity} onSet={() => writeRegisterUI(REGISTERS.PARITY, parity)} openModal={openModal} />
                             </View>
                         )}
                         <SubHeader title="1.2 USB" isOpen={subSectionState.usb} onToggle={() => toggleSub('usb')} />
                         {subSectionState.usb && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="1.2.1 Mod" value={usbMod} options={OPTIONS.usbMod} onSelect={setUsbMod} onSet={() => writeRegisterUI(46, usbMod)} openModal={openModal} />
-                                {usbMod === 1 && <DropdownRow label="1.2.2 Periyot" value={usbPeriod} options={OPTIONS.usbPeriod} onSelect={setUsbPeriod} onSet={() => writeRegisterUI(47, usbPeriod)} openModal={openModal} />}
+                                <DropdownRow label="1.2.1 Mod" value={usbMod} options={OPTIONS.usbMod} onSelect={setUsbMod} onSet={() => writeRegisterUI(REGISTERS.USB_MODE, usbMod)} openModal={openModal} />
+                                {usbMod === 1 && <DropdownRow label="1.2.2 Periyot" value={usbPeriod} options={OPTIONS.usbPeriod} onSelect={setUsbPeriod} onSet={() => writeRegisterUI(REGISTERS.USB_PERIOD, usbPeriod)} openModal={openModal} />}
                             </View>
                         )}
 
@@ -385,7 +558,7 @@ export default function SettingsScreen() {
                                         : OPTIONS.wirelessType
                                     }
                                     onSelect={setWirelessType}
-                                    onSet={() => writeRegisterUI(48, wirelessType)}
+                                    onSet={() => writeRegisterUI(REGISTERS.WIRELESS_TYPE, wirelessType)}
                                     openModal={openModal}
                                 />
 
@@ -417,15 +590,15 @@ export default function SettingsScreen() {
                         <SubHeader title="2.1 Röle 1" isOpen={subSectionState.role1} onToggle={() => toggleSub('role1')} />
                         {subSectionState.role1 && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="2.1.1 Kontrol" value={r1Ctrl} options={OPTIONS.relayControl} onSelect={setR1Ctrl} onSet={() => writeRegisterUI(74, r1Ctrl)} openModal={openModal} />
+                                <DropdownRow label="2.1.1 Kontrol" value={r1Ctrl} options={OPTIONS.relayControl} onSelect={setR1Ctrl} onSet={() => writeRegisterUI(REGISTERS.RELAY1_CONTROL, r1Ctrl)} openModal={openModal} />
 
                                 {r1Ctrl === 1 && (
                                     <>
-                                        <SettingRow label="2.1.2 Değer (kg)" value={r1Val} onChange={setR1Val} onSet={() => writeRegisterUI(75, r1Val, true)} />
-                                        <SettingRow label="2.1.3 Histerisis (kg)" value={r1Hyst} onChange={setR1Hyst} onSet={() => writeRegisterUI(77, r1Hyst, true)} />
-                                        <DropdownRow label="2.1.4 Kontak Durumu" value={r1Cont} options={OPTIONS.relayContact} onSelect={setR1Cont} onSet={() => writeRegisterUI(79, r1Cont)} openModal={openModal} />
-                                        <DropdownRow label="2.1.5 Açma Gecikmesi" value={r1OpenDly} options={OPTIONS.relayDelay} onSelect={setR1OpenDly} onSet={() => writeRegisterUI(80, r1OpenDly)} openModal={openModal} />
-                                        <DropdownRow label="2.1.6 Kapatma Gecikmesi" value={r1CloseDly} options={OPTIONS.relayDelay} onSelect={setR1CloseDly} onSet={() => writeRegisterUI(81, r1CloseDly)} openModal={openModal} />
+                                        <SettingRow label="2.1.2 Değer (kg)" value={r1Val} onChange={setR1Val} onSet={() => writeRegisterUI(REGISTERS.RELAY1_SET, r1Val, true)} />
+                                        <SettingRow label="2.1.3 Histerisis (kg)" value={r1Hyst} onChange={setR1Hyst} onSet={() => writeRegisterUI(REGISTERS.RELAY1_HYSTERESIS, r1Hyst, true)} />
+                                        <DropdownRow label="2.1.4 Kontak Durumu" value={r1Cont} options={OPTIONS.relayContact} onSelect={setR1Cont} onSet={() => writeRegisterUI(REGISTERS.RELAY1_DIRECTION, r1Cont)} openModal={openModal} />
+                                        <DropdownRow label="2.1.5 Açma Gecikmesi" value={r1OpenDly} options={OPTIONS.relayDelay} onSelect={setR1OpenDly} onSet={() => writeRegisterUI(REGISTERS.RELAY1_ON_DELAY, r1OpenDly)} openModal={openModal} />
+                                        <DropdownRow label="2.1.6 Kapatma Gecikmesi" value={r1CloseDly} options={OPTIONS.relayDelay} onSelect={setR1CloseDly} onSet={() => writeRegisterUI(REGISTERS.RELAY1_OFF_DELAY, r1CloseDly)} openModal={openModal} />
                                     </>
                                 )}
 
@@ -440,15 +613,15 @@ export default function SettingsScreen() {
                         <SubHeader title="2.2 Röle 2" isOpen={subSectionState.role2} onToggle={() => toggleSub('role2')} />
                         {subSectionState.role2 && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="2.2.1 Kontrol" value={r2Ctrl} options={OPTIONS.relayControl} onSelect={setR2Ctrl} onSet={() => writeRegisterUI(82, r2Ctrl)} openModal={openModal} />
+                                <DropdownRow label="2.2.1 Kontrol" value={r2Ctrl} options={OPTIONS.relayControl} onSelect={setR2Ctrl} onSet={() => writeRegisterUI(REGISTERS.RELAY2_CONTROL, r2Ctrl)} openModal={openModal} />
 
                                 {r2Ctrl === 1 && (
                                     <>
-                                        <SettingRow label="2.2.2 Değer (kg)" value={r2Val} onChange={setR2Val} onSet={() => writeRegisterUI(83, r2Val, true)} />
-                                        <SettingRow label="2.2.3 Histerisis (kg)" value={r2Hyst} onChange={setR2Hyst} onSet={() => writeRegisterUI(85, r2Hyst, true)} />
-                                        <DropdownRow label="2.2.4 Kontak Durumu" value={r2Cont} options={OPTIONS.relayContact} onSelect={setR2Cont} onSet={() => writeRegisterUI(87, r2Cont)} openModal={openModal} />
-                                        <DropdownRow label="2.2.5 Açma Gecikmesi" value={r2OpenDly} options={OPTIONS.relayDelay} onSelect={setR2OpenDly} onSet={() => writeRegisterUI(88, r2OpenDly)} openModal={openModal} />
-                                        <DropdownRow label="2.2.6 Kapatma Gecikmesi" value={r2CloseDly} options={OPTIONS.relayDelay} onSelect={setR2CloseDly} onSet={() => writeRegisterUI(89, r2CloseDly)} openModal={openModal} />
+                                        <SettingRow label="2.2.2 Değer (kg)" value={r2Val} onChange={setR2Val} onSet={() => writeRegisterUI(REGISTERS.RELAY2_SET, r2Val, true)} />
+                                        <SettingRow label="2.2.3 Histerisis (kg)" value={r2Hyst} onChange={setR2Hyst} onSet={() => writeRegisterUI(REGISTERS.RELAY2_HYSTERESIS, r2Hyst, true)} />
+                                        <DropdownRow label="2.2.4 Kontak Durumu" value={r2Cont} options={OPTIONS.relayContact} onSelect={setR2Cont} onSet={() => writeRegisterUI(REGISTERS.RELAY2_DIRECTION, r2Cont)} openModal={openModal} />
+                                        <DropdownRow label="2.2.5 Açma Gecikmesi" value={r2OpenDly} options={OPTIONS.relayDelay} onSelect={setR2OpenDly} onSet={() => writeRegisterUI(REGISTERS.RELAY2_ON_DELAY, r2OpenDly)} openModal={openModal} />
+                                        <DropdownRow label="2.2.6 Kapatma Gecikmesi" value={r2CloseDly} options={OPTIONS.relayDelay} onSelect={setR2CloseDly} onSet={() => writeRegisterUI(REGISTERS.RELAY2_OFF_DELAY, r2CloseDly)} openModal={openModal} />
                                     </>
                                 )}
 
@@ -468,23 +641,23 @@ export default function SettingsScreen() {
                 <AccordionHeader title="Tartı" sectionId="3" expandedSection={expandedSection} setExpandedSection={setExpandedSection} />
                 {expandedSection === "3" && (
                     <View style={styles.sectionContent}>
-                        <SettingRow label="3.1 Kapasite" value={capacity} onChange={setCapacity} onSet={() => writeRegisterUI(113, capacity, true)} />
-                        <DropdownRow label="3.2 Sıfır Limit" value={zeroLimit} options={OPTIONS.zeroLimit} onSelect={setZeroLimit} onSet={() => writeRegisterUI(115, zeroLimit)} openModal={openModal} />
+                        <SettingRow label="3.1 Kapasite" value={capacity} onChange={setCapacity} onSet={() => writeRegisterUI(REGISTERS.MAX_CAPACITY, capacity, true)} />
+                        <DropdownRow label="3.2 Sıfır Limit" value={zeroLimit} options={OPTIONS.zeroLimit} onSelect={setZeroLimit} onSet={() => writeRegisterUI(REGISTERS.ZERO_LIMIT, zeroLimit)} openModal={openModal} />
 
                         <SubHeader title="3.3 Çözünürlük" isOpen={subSectionState.resolution} onToggle={() => setSubSectionState(p => ({ ...p, resolution: !p.resolution }))} />
                         {subSectionState.resolution && (
                             <View style={styles.subSection}>
-                                <SettingRow label="3.3.1 Çarpan (Dot)" value={dot} onChange={(v) => setDot(parseInt(v) || 0)} onSet={() => writeRegisterUI(116, dot)} />
-                                <SettingRow label="3.3.2 Adım (Step)" value={step} onChange={setStep} onSet={() => writeRegisterUI(117, step)} />
+                                <SettingRow label="3.3.1 Çarpan (Dot)" value={dot} onChange={(v) => setDot(parseInt(v) || 0)} onSet={() => writeRegisterUI(REGISTERS.DEVICE_DOT, dot)} />
+                                <SettingRow label="3.3.2 Adım (Step)" value={step} onChange={setStep} onSet={() => writeRegisterUI(REGISTERS.STEP, step)} />
                             </View>
                         )}
 
-                        <DropdownRow label="3.4 Birim" value={unit} options={OPTIONS.unit} onSelect={setUnit} onSet={() => writeRegisterUI(119, unit)} openModal={openModal} />
-                        <DropdownRow label="3.5 Hareketsizlik" value={stability} options={OPTIONS.stability} onSelect={setStability} onSet={() => writeRegisterUI(120, stability)} openModal={openModal} />
+                        <DropdownRow label="3.4 Birim" value={unit} options={OPTIONS.unit} onSelect={setUnit} onSet={() => writeRegisterUI(REGISTERS.UNIT, unit)} openModal={openModal} />
+                        <DropdownRow label="3.5 Hareketsizlik" value={stability} options={OPTIONS.stability} onSelect={setStability} onSet={() => writeRegisterUI(REGISTERS.STABILITY, stability)} openModal={openModal} />
 
                         <ActionRow label={`3.6 İç Sayım: ${mvvValue} mV/V`} btnText="OKU" onPress={handleReadInternal} />
 
-                        <DropdownRow label="3.7 Dara" value={tareMode} options={OPTIONS.tare} onSelect={setTareMode} onSet={() => writeRegisterUI(121, tareMode)} openModal={openModal} />
+                        <DropdownRow label="3.7 Dara" value={tareMode} options={OPTIONS.tare} onSelect={setTareMode} onSet={() => writeRegisterUI(REGISTERS.TARE_ENABLE, tareMode)} openModal={openModal} />
                     </View>
                 )}
 
@@ -501,18 +674,18 @@ export default function SettingsScreen() {
                             </Text>
                         </View>
 
-                        <SettingRow label="4.1 Yük Maks" value={anaMaxLoad} onChange={setAnaMaxLoad} onSet={() => writeRegisterUI(91, parseFloat(anaMaxLoad) * 1000, true)} />
-                        <SettingRow label="4.2 Yük Min" value={anaMinLoad} onChange={setAnaMinLoad} onSet={() => writeRegisterUI(93, parseFloat(anaMinLoad) * 1000, true)} />
+                        <SettingRow label="4.1 Yük Maks" value={anaMaxLoad} onChange={setAnaMaxLoad} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MAX_LOAD, parseFloat(anaMaxLoad) * 1000, true)} />
+                        <SettingRow label="4.2 Yük Min" value={anaMinLoad} onChange={setAnaMinLoad} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MIN_LOAD, parseFloat(anaMinLoad) * 1000, true)} />
 
                         <View style={styles.divider} />
 
-                        <SettingRow label="4.3 mA maks (Maks: 21.5)" value={anaMaxMa} onChange={setAnaMaxMa} onSet={() => writeRegisterUI(95, parseFloat(anaMaxMa) * 1000, true)} />
-                        <SettingRow label="4.4 mA min (Min: 0)" value={anaMinMa} onChange={setAnaMinMa} onSet={() => writeRegisterUI(97, parseFloat(anaMinMa) * 1000, true)} />
+                        <SettingRow label="4.3 mA maks (Maks: 21.5)" value={anaMaxMa} onChange={setAnaMaxMa} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MAX_MA, parseFloat(anaMaxMa) * 1000, true)} />
+                        <SettingRow label="4.4 mA min (Min: 0)" value={anaMinMa} onChange={setAnaMinMa} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MIN_MA, parseFloat(anaMinMa) * 1000, true)} />
 
                         <View style={styles.divider} />
 
-                        <SettingRow label="4.5 V maks (Maks: 11.5)" value={anaMaxV} onChange={setAnaMaxV} onSet={() => writeRegisterUI(124, parseFloat(anaMaxV) * 1000, true)} />
-                        <SettingRow label="4.6 V min (Min: 0)" value={anaMinV} onChange={setAnaMinV} onSet={() => writeRegisterUI(126, parseFloat(anaMinV) * 1000, true)} />
+                        <SettingRow label="4.5 V maks (Maks: 11.5)" value={anaMaxV} onChange={setAnaMaxV} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MAX_V, parseFloat(anaMaxV) * 1000, true)} />
+                        <SettingRow label="4.6 V min (Min: 0)" value={anaMinV} onChange={setAnaMinV} onSet={() => writeRegisterUI(REGISTERS.ANALOG_MIN_V, parseFloat(anaMinV) * 1000, true)} />
                     </View>
                 )}
 
@@ -611,31 +784,31 @@ export default function SettingsScreen() {
                 <AccordionHeader title="Filtre" sectionId="6" expandedSection={expandedSection} setExpandedSection={setExpandedSection} />
                 {expandedSection === "6" && (
                     <View style={styles.sectionContent}>
-                        <DropdownRow label="6.1 Filtre Ayarı" value={filterType} options={OPTIONS.filterType} onSelect={setFilterType} onSet={() => writeRegisterUI(107, filterType)} openModal={openModal} />
+                        <DropdownRow label="6.1 Filtre Ayarı" value={filterType} options={OPTIONS.filterType} onSelect={setFilterType} onSet={() => writeRegisterUI(REGISTERS.FILTER_TYPE, filterType)} openModal={openModal} />
 
                         {/* KAPALI: ADCHZ, Karar Süresi */}
                         {filterType === 0 && (
                             <>
-                                <DropdownRow label="6.1.4 ADC Hz" value={adcHz} options={OPTIONS.adcHz} onSelect={setAdcHz} onSet={() => writeRegisterUI(108, adcHz)} openModal={openModal} />
-                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(111, decisionTime)} openModal={openModal} />
+                                <DropdownRow label="6.1.4 ADC Hz" value={adcHz} options={OPTIONS.adcHz} onSelect={setAdcHz} onSet={() => writeRegisterUI(REGISTERS.ADC_HZ, adcHz)} openModal={openModal} />
+                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(REGISTERS.DECISION_TIME, decisionTime)} openModal={openModal} />
                             </>
                         )}
 
                         {/* ÖZEL: Tepki Süresi, Titreşim, Karar Süresi */}
                         {filterType === 1 && (
                             <>
-                                <DropdownRow label="6.1.1 Tepki Süresi" value={response} options={OPTIONS.responseTime} onSelect={setResponse} onSet={() => writeRegisterUI(109, response)} openModal={openModal} />
-                                <DropdownRow label="6.1.2 Titreşim" value={vibration} options={OPTIONS.vibration} onSelect={setVibration} onSet={() => writeRegisterUI(110, vibration)} openModal={openModal} />
-                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(111, decisionTime)} openModal={openModal} />
+                                <DropdownRow label="6.1.1 Tepki Süresi" value={response} options={OPTIONS.responseTime} onSelect={setResponse} onSet={() => writeRegisterUI(REGISTERS.RESPONSE_TIME, response)} openModal={openModal} />
+                                <DropdownRow label="6.1.2 Titreşim" value={vibration} options={OPTIONS.vibration} onSelect={setVibration} onSet={() => writeRegisterUI(REGISTERS.VIBRATION, vibration)} openModal={openModal} />
+                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(REGISTERS.DECISION_TIME, decisionTime)} openModal={openModal} />
                             </>
                         )}
 
                         {/* HAREKETLİ ORTALAMA: ADC Hz, Ortalama Adet, Karar Süresi */}
                         {filterType === 2 && (
                             <>
-                                <DropdownRow label="6.1.4 ADC Hz" value={adcHz} options={OPTIONS.adcHz} onSelect={setAdcHz} onSet={() => writeRegisterUI(108, adcHz)} openModal={openModal} />
-                                <DropdownRow label="6.1.5 Ortalama Adet" value={parseInt(avgCount) || 0} options={OPTIONS.avgCount} onSelect={setAvgCount} onSet={() => writeRegisterUI(112, avgCount)} openModal={openModal} />
-                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(111, decisionTime)} openModal={openModal} />
+                                <DropdownRow label="6.1.4 ADC Hz" value={adcHz} options={OPTIONS.adcHz} onSelect={setAdcHz} onSet={() => writeRegisterUI(REGISTERS.ADC_HZ, adcHz)} openModal={openModal} />
+                                <DropdownRow label="6.1.5 Ortalama Adet" value={parseInt(avgCount) || 0} options={OPTIONS.avgCount} onSelect={setAvgCount} onSet={() => writeRegisterUI(REGISTERS.MOVING_AVG_COUNT, avgCount)} openModal={openModal} />
+                                <DropdownRow label="6.1.3 Karar Süresi" value={decisionTime} options={OPTIONS.decisionTime} onSelect={setDecisionTime} onSet={() => writeRegisterUI(REGISTERS.DECISION_TIME, decisionTime)} openModal={openModal} />
                             </>
                         )}
                     </View>
@@ -649,13 +822,13 @@ export default function SettingsScreen() {
                 <AccordionHeader title="Genel" sectionId="7" expandedSection={expandedSection} setExpandedSection={setExpandedSection} />
                 {expandedSection === "7" && (
                     <View style={styles.sectionContent}>
-                        <DropdownRow label="7.1 Dil" value={lang} options={OPTIONS.language} onSelect={setLang} onSet={() => writeRegisterUI(122, lang)} openModal={openModal} />
+                        <DropdownRow label="7.1 Dil" value={lang} options={OPTIONS.language} onSelect={setLang} onSet={() => writeRegisterUI(REGISTERS.LANGUAGE, lang)} openModal={openModal} />
 
                         <SubHeader title="7.2 Şifre" isOpen={subSectionState.pass} onToggle={() => setSubSectionState(p => ({ ...p, pass: !p.pass }))} />
                         {subSectionState.pass && (
                             <View style={styles.subSection}>
-                                <DropdownRow label="7.2.1 Mod" value={passMode} options={OPTIONS.passwordMode} onSelect={setPassMode} onSet={() => writeRegisterUI(123, passMode)} openModal={openModal} />
-                                <SettingRow label="7.2.2 Yeni Şifre" value={newPass} onChange={setNewPass} onSet={() => writeRegisterUI(137, newPass, true)} />
+                                <DropdownRow label="7.2.1 Mod" value={passMode} options={OPTIONS.passwordMode} onSelect={setPassMode} onSet={() => writeRegisterUI(REGISTERS.PASSWORD_MODE, passMode)} openModal={openModal} />
+                                <SettingRow label="7.2.2 Yeni Şifre" value={newPass} onChange={setNewPass} onSet={() => writeRegisterUI(REGISTERS.PASSWORD_VALUE, newPass, true)} />
                             </View>
                         )}
 
@@ -667,9 +840,19 @@ export default function SettingsScreen() {
                                     { text: 'İptal', style: 'cancel' },
                                     {
                                         text: 'Evet, Sıfırla',
-                                        onPress: () => {
-                                            modbusService.factoryReset().catch(() => { });
-                                            router.replace('/');
+                                        onPress: async () => {
+                                            setLoading(true);
+                                            try {
+                                                await modbusService.factoryReset();
+                                                setTimeout(() => {
+                                                    modbusService.safeTeardown(true);
+                                                    router.replace('/');
+                                                }, 100);
+                                            } catch (e) {
+                                                Alert.alert("Hata", "Sıfırlanamadı: " + e.message);
+                                            } finally {
+                                                setLoading(false);
+                                            }
                                         },
                                         style: 'destructive'
                                     }
@@ -693,6 +876,53 @@ export default function SettingsScreen() {
 
                         <View style={styles.divider} />
 
+                        {/* PROFİLLER BÖLÜMÜ */}
+                        <View style={{ marginTop: 10 }}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                <Text style={styles.subHeader}>7.6 Profiller</Text>
+                                <TouchableOpacity
+                                    style={[styles.miniButton, { width: 100, backgroundColor: '#4CAF50', borderColor: '#388E3C' }]}
+                                    onPress={() => setSaveModalVisible(true)}
+                                >
+                                    <Text style={[styles.miniButtonText, { fontSize: 12, color: 'white' }]}>KAYDET</Text>
+                                </TouchableOpacity>
+                            </View>
+
+                            {profiles.length === 0 ? (
+                                <View style={styles.infoBox}>
+                                    <Text style={styles.infoText}>Henüz kayıtlı bir profil yok. Mevcut ayarları yukarıdaki butonla kaydedebilirsiniz.</Text>
+                                </View>
+                            ) : (
+                                profiles.map(profile => (
+                                    <View key={profile.id} style={styles.profileRow}>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={styles.profileName}>{profile.name}</Text>
+                                            <Text style={styles.profileDetail}>Kayıt: {new Date(parseInt(profile.id)).toLocaleDateString()}</Text>
+                                        </View>
+                                        <TouchableOpacity
+                                            style={[styles.profileButton, { backgroundColor: '#2196F3' }]}
+                                            onPress={() => handleApplyProfile(profile)}
+                                        >
+                                            <Text style={styles.profileButtonText}>UYGULA</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity
+                                            style={[styles.profileButton, { backgroundColor: '#F44336', marginLeft: 5 }]}
+                                            onPress={() => {
+                                                Alert.alert("Sil", "Bu profil silinecektir. Onaylıyor musunuz?", [
+                                                    { text: "İptal", style: "cancel" },
+                                                    { text: "Sil", style: "destructive", onPress: () => handleDeleteProfile(profile.id) }
+                                                ]);
+                                            }}
+                                        >
+                                            <Text style={styles.profileButtonText}>SİL</Text>
+                                        </TouchableOpacity>
+                                    </View>
+                                ))
+                            )}
+                        </View>
+
+                        <View style={styles.divider} />
+
                         <ActionRow label="Sistem Yeniden Başlat" btnText="BAŞLAT" onPress={() => {
                             Alert.alert(
                                 "Yeniden Başlat",
@@ -701,9 +931,19 @@ export default function SettingsScreen() {
                                     { text: 'İptal', style: 'cancel' },
                                     {
                                         text: 'Başlat',
-                                        onPress: () => {
-                                            modbusService.restart().catch(() => { });
-                                            router.replace('/');
+                                        onPress: async () => {
+                                            setLoading(true);
+                                            try {
+                                                await modbusService.restart();
+                                                setTimeout(() => {
+                                                    modbusService.safeTeardown(true);
+                                                    router.replace('/');
+                                                }, 100);
+                                            } catch (e) {
+                                                Alert.alert("Hata", "Yeniden başlatılamadı: " + e.message);
+                                            } finally {
+                                                setLoading(false);
+                                            }
                                         }
                                     }
                                 ]
@@ -721,6 +961,37 @@ export default function SettingsScreen() {
                     )} />
                     <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}><Text style={{ color: 'white' }}>Kapat</Text></TouchableOpacity>
                 </View></View>
+            </Modal>
+
+            {/* Profil Kaydet Modalı */}
+            <Modal visible={saveModalVisible} transparent={true} animationType="fade">
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>Profili Kaydet</Text>
+                        <Text style={styles.infoText}>Mevcut tüm ayarlar bu isimle kaydedilecektir.</Text>
+                        <TextInput
+                            style={styles.modalInput}
+                            placeholder="Profil İsmi (Örn: Beton Santrali)"
+                            value={profileName}
+                            onChangeText={setProfileName}
+                            autoFocus
+                        />
+                        <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                            <TouchableOpacity
+                                style={[styles.closeButton, { flex: 1, backgroundColor: '#757575', marginTop: 0 }]}
+                                onPress={() => { setSaveModalVisible(false); setProfileName(""); }}
+                            >
+                                <Text style={{ color: 'white' }}>İptal</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={[styles.closeButton, { flex: 1, backgroundColor: '#4CAF50', marginTop: 0 }]}
+                                onPress={handleSaveProfile}
+                            >
+                                <Text style={{ color: 'white' }}>Kaydet</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
             </Modal>
 
             {/* IP Giriş Modalı */}
@@ -767,7 +1038,7 @@ export default function SettingsScreen() {
             {/* Teşhis Bilgisi */}
             <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%' }}>
                 <Text style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>
-                    Tel IP (Metro): {Constants.expoConfig?.hostUri || 'Bilinmiyor'} | Mod: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
+                    {Constants.expoConfig?.hostUri ? `Tel IP: ${Constants.expoConfig.hostUri}` : "Mod: Standalone (APK)"} | Bağlantı: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
                 </Text>
             </View>
         </View>
@@ -775,34 +1046,109 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#fff' },
-    loadingOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.7)', justifyContent: 'center', alignItems: 'center', zIndex: 10 },
-    accordionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 15, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderColor: '#000' },
-    accordionTitle: { fontSize: 22, fontWeight: 'bold', color: '#000' },
-    iconText: { fontSize: 24, fontWeight: 'bold', color: '#555' },
-    subHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 5, backgroundColor: '#FFFFFF', paddingRight: 10 },
-    subHeaderText: { fontSize: 16, color: '#000', flex: 1 },
-    miniButton: { backgroundColor: '#E0E0E0', width: 60, height: 35, justifyContent: 'center', alignItems: 'center', borderRadius: 3, borderWidth: 1, borderColor: '#BDBDBD' },
-    miniButtonText: { fontSize: 20, fontWeight: 'bold' },
-    subSection: { marginBottom: 10 },
-    sectionContent: { padding: 10 },
-    row: { flexDirection: 'row', alignItems: 'center', marginBottom: 10, justifyContent: 'space-between' },
-    label: { flex: 1, fontSize: 16, color: '#000' },
-    input: { borderWidth: 1, borderColor: '#CCC', borderRadius: 2, padding: 5, width: 100, backgroundColor: '#F5F5F5' },
-    dropdown: { borderWidth: 1, borderColor: '#CCC', borderRadius: 2, padding: 8, width: 120, backgroundColor: '#D1D1D1', flexDirection: 'row', justifyContent: 'space-between' },
-    dropdownText: { fontSize: 14 },
-    setButton: { backgroundColor: '#D1D1D1', paddingVertical: 8, paddingHorizontal: 20, borderRadius: 2, borderWidth: 1, borderColor: '#BBB' },
-    setText: { fontWeight: 'bold' },
-    infoBox: { padding: 10, backgroundColor: '#f5f5f5', borderRadius: 4, marginTop: 5 },
-    infoText: { fontSize: 12, color: '#666', fontStyle: 'italic' },
-    actionButton: { backgroundColor: '#D1D1D1', padding: 8, borderRadius: 2, borderWidth: 1, borderColor: '#BBB' },
-    actionText: { fontWeight: 'bold', fontSize: 12 },
-    fullWidthButton: { backgroundColor: '#D1D1D1', padding: 12, borderRadius: 2, alignItems: 'center', marginTop: 10, borderWidth: 1, borderColor: '#BBB' },
+    safeContainer: { flex: 1, backgroundColor: '#f5f7fa' },
+    container: { flex: 1, backgroundColor: '#f5f7fa' },
+    header: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        paddingTop: 50, paddingBottom: 20, paddingHorizontal: 20,
+        backgroundColor: '#fff', elevation: 2
+    },
+    headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
+    content: { padding: 15 },
+    sectionContent: { paddingHorizontal: 15, paddingBottom: 15 },
+    subSection: { paddingLeft: 10, paddingBottom: 10, borderLeftWidth: 1, borderLeftColor: '#eee', marginLeft: 10 },
+    infoBox: { backgroundColor: '#f0f0f0', padding: 12, borderRadius: 8, marginVertical: 10 },
+
+    // Accordion Styles
+    accordionHeader: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        padding: 18, backgroundColor: '#fff', borderRadius: 12, marginBottom: 10,
+        elevation: 2, borderLeftWidth: 5, borderLeftColor: '#2196F3'
+    },
+    accordionTitle: { fontSize: 16, fontWeight: 'bold', color: '#333' },
+    iconText: { fontSize: 20, fontWeight: 'bold', color: '#2196F3' },
+
+    // Row & Input Styles
+    row: {
+        flexDirection: 'row', alignItems: 'center', paddingVertical: 12,
+        borderBottomWidth: 1, borderBottomColor: '#f0f0f0', backgroundColor: '#fff',
+        paddingHorizontal: 10
+    },
+    label: { flex: 1, fontSize: 16, color: '#333', fontWeight: '500' },
+    input: {
+        width: 100, height: 45, borderWidth: 1, borderColor: '#ddd',
+        borderRadius: 10, paddingHorizontal: 10, textAlign: 'center',
+        backgroundColor: '#f9f9f9', color: '#000', marginRight: 10,
+        fontSize: 16
+    },
+    setButton: { backgroundColor: '#4CAF50', paddingVertical: 10, paddingHorizontal: 15, borderRadius: 8 },
+    setText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
+
+    // Dropdown Styles
+    dropdown: {
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+        width: 140, height: 45, borderWidth: 1, borderColor: '#ddd',
+        borderRadius: 10, paddingHorizontal: 12, backgroundColor: '#f9f9f9', marginRight: 10
+    },
+    dropdownText: { fontSize: 15, color: '#333', fontWeight: '500' },
+    caret: { fontSize: 12, color: '#666' },
+
+    // Sub Header
+    subHeaderRow: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        backgroundColor: '#e3f2fd', padding: 12, borderRadius: 8, marginTop: 10, marginBottom: 5
+    },
+    subHeaderText: { fontSize: 14, fontWeight: 'bold', color: '#1976D2' },
+    miniButton: { backgroundColor: '#fff', width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', elevation: 1 },
+    miniButtonText: { color: '#1976D2', fontWeight: 'bold', fontSize: 18 },
+
+    // Action Buttons
+    actionButton: { backgroundColor: '#2196F3', paddingVertical: 10, paddingHorizontal: 15, borderRadius: 8 },
+    actionText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
+
+    // Modal & Loading
     modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
-    modalContent: { width: '80%', backgroundColor: '#fff', borderRadius: 10, padding: 20, maxHeight: '60%' },
-    modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 10, textAlign: 'center' },
-    modalItem: { padding: 15, borderBottomWidth: 1, borderColor: '#eee' },
-    modalText: { fontSize: 16, color: 'black' },
-    modalInput: { borderWidth: 1, borderColor: '#ccc', borderRadius: 5, padding: 10, width: '100%', marginBottom: 10, fontSize: 16, backgroundColor: '#f9f9f9', color: '#000' },
-    closeButton: { marginTop: 15, backgroundColor: '#F44336', padding: 10, alignItems: 'center', borderRadius: 5 }
+    modalContent: { width: '85%', backgroundColor: '#fff', borderRadius: 20, padding: 25, elevation: 10 },
+    modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#333', marginBottom: 15, textAlign: 'center' },
+    modalInput: {
+        borderWidth: 1, borderColor: '#ddd', borderRadius: 10, padding: 12,
+        fontSize: 18, textAlign: 'center', backgroundColor: '#f9f9f9', marginBottom: 15, color: '#000'
+    },
+    modalItem: {
+        paddingVertical: 18,
+        paddingHorizontal: 20,
+        borderBottomWidth: 1,
+        borderBottomColor: '#eee',
+        width: '100%',
+        alignItems: 'center'
+    },
+    modalText: {
+        fontSize: 18,
+        color: '#333',
+        fontWeight: '500'
+    },
+    closeButton: { padding: 15, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2196F3', marginTop: 10 },
+    loadingOverlay: {
+        ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.8)',
+        justifyContent: 'center', alignItems: 'center', zIndex: 1000
+    },
+    loadingText: { marginTop: 15, fontSize: 16, color: '#2196F3', fontWeight: 'bold' },
+    progressText: { marginTop: 5, fontSize: 12, color: '#666' },
+    infoText: { fontSize: 13, color: '#666', textAlign: 'center', marginBottom: 10 },
+
+    // Profile Section
+    profileSection: { marginTop: 15, padding: 15, backgroundColor: '#fff', borderRadius: 12, elevation: 2 },
+    profileSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#333', marginBottom: 15 },
+    profileItem: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#eee'
+    },
+    profileItemName: { fontSize: 15, color: '#333', fontWeight: '500' },
+    profileActions: { flexDirection: 'row', gap: 8 },
+    applyBtn: { backgroundColor: '#4CAF50', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6 },
+    deleteBtn: { backgroundColor: '#F44336', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6 },
+    btnText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+    saveBtn: { backgroundColor: '#2196F3', padding: 15, borderRadius: 10, alignItems: 'center', marginTop: 15 },
 });
+
+
