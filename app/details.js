@@ -5,6 +5,7 @@ import { ActivityIndicator, Alert, Modal, StyleSheet, Text, TextInput, Touchable
 import bleService from '../services/bleService';
 import modbusService from '../services/modbusService';
 import { STATUS_BITS, checkStatus, getStatusMessage } from '../services/modbusUtils';
+import { MOCK_COMPANY_INFO } from '../constants/mock-data';
 
 export default function WeightScreen() {
   const { deviceId, deviceName, transport, ip, port: routePort } = useLocalSearchParams();
@@ -461,7 +462,7 @@ export default function WeightScreen() {
         {/* Teşhis Bilgisi */}
         <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%', position: 'absolute', bottom: 0 }}>
           <Text style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>
-            Tel IP (Metro): {Constants.expoConfig?.hostUri || 'Bilinmiyor'} | Mod: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
+            {MOCK_COMPANY_INFO.name} | v{MOCK_COMPANY_INFO.version} | Mod: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
           </Text>
         </View>
       </View>
@@ -510,7 +511,7 @@ export default function WeightScreen() {
       {/* Teşhis Bilgisi & Durum Mesajları */}
       <View style={{ padding: 10, backgroundColor: '#f0f0f0', borderTopWidth: 1, borderTopColor: '#ddd', width: '100%', position: 'absolute', bottom: 0 }}>
         <Text style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>
-          {Constants.expoConfig?.hostUri ? `Tel IP: ${Constants.expoConfig.hostUri}` : "Mod: Standalone (APK)"} | Bağlantı: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
+          {MOCK_COMPANY_INFO.name} | v{MOCK_COMPANY_INFO.version} | Bağlantı: {modbusService.transport === 'TCP' ? 'WiFi' : 'BLE'}
         </Text>
         {statusMessages.length > 0 && (
           <View style={{ marginTop: 5, alignItems: 'center' }}>
