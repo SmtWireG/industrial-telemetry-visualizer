@@ -51,14 +51,7 @@ cd industrial-telemetry-visualizer
 npm install
 ```
 
-### 3. Ortam Değişkenlerini Ayarlayın (İsteğe Bağlı)
-```bash
-# .env dosyası oluşturun (örnek)
-DEVICE_DEFAULT_IP=192.168.137.182
-DEVICE_DEFAULT_PORT=502
-```
-
-### 4. Uygulamayı Başlatın
+### 3. Uygulamayı Başlatın
 
 #### Geliştirim Ortamında:
 ```bash
@@ -321,27 +314,6 @@ export const MOCK_COMPANY_INFO = {
 
 Bu proje MIT Lisansı altında yayınlanmıştır. Daha fazla bilgi için [LICENSE](LICENSE) dosyasına bakın.
 
-## 🤝 Katkı
-
-Katkılarınız hoşgeldiniz! Lütfen:
-
-1. Repository'yi fork edin
-2. Özellik branch'i oluşturun (`git checkout -b feature/amazing-feature`)
-3. Değişiklikleri commit edin (`git commit -m 'Add amazing feature'`)
-4. Branch'e push edin (`git push origin feature/amazing-feature`)
-5. Pull Request açın
-
-## 📞 İletişim & Destek
-
-- **Issues**: [GitHub Issues](https://github.com/SmtWireG/industrial-telemetry-visualizer/issues)
-- **Email**: support@example.com
-- **Website**: https://telemetry.example.com
-
-## ✨ Teşekkürler
-
-- Expo team for amazing framework
-- React Native community
-- Modbus protocol documentation
 
 ---
 
