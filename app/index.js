@@ -26,11 +26,11 @@ export default function HomeScreen() {
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
 
   // Subnet yönetimi
-  const [subnet, setSubnet] = useState("192.168.137"); // Kullanıcının durumuna göre güncellendi
+  const [subnet, setSubnet] = useState("192.168.1");
   const [isSubnetModalVisible, setIsSubnetModalVisible] = useState(false);
 
   // Manüel IP Modal
-  const [manualIp, setManualIp] = useState("192.168.137.116");
+  const [manualIp, setManualIp] = useState("192.168.1.100");
   const [manualPort, setManualPort] = useState("23");
   const [isManualModalVisible, setIsManualModalVisible] = useState(false);
 
@@ -174,7 +174,7 @@ export default function HomeScreen() {
       });
 
       if (found.length === 0) {
-        Alert.alert("Sonuç", "Hiçbir ağda (192.168.1.x, 137.x, 4.x) cihaz bulunamadı. \n\nLütfen cihazın ve telefonun aynı Hotspot'a bağlı olduğundan emin olun.");
+        Alert.alert("Sonuç", "Hiçbir ağda (192.168.1.x, 192.168.2.x, 192.168.4.x) cihaz bulunamadı. \n\nLütfen cihazın ve telefonun aynı Hotspot'a bağlı olduğundan emin olun.");
       }
 
       setDevices(found.map(d => ({
@@ -301,7 +301,7 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Terazi Fabrikası</Text>
+        <Text style={styles.title}>Telemetri Paneli</Text>
         <View style={styles.scanButtons}>
           <TouchableOpacity
             style={[styles.scanBtn, styles.bleBtn]}
@@ -438,7 +438,7 @@ export default function HomeScreen() {
                 value={manualIp}
                 onChangeText={setManualIp}
                 keyboardType="numeric"
-                placeholder="192.168.137.116"
+                placeholder="192.168.1.100"
               />
             </View>
 

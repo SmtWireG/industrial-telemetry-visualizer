@@ -212,9 +212,9 @@ export default function SettingsScreen() {
     const [usbMod, setUsbMod] = useState(0);
     const [usbPeriod, setUsbPeriod] = useState(1);
     const [wirelessType, setWirelessType] = useState(0);
-    const [ssid, setSsid] = useState("ESITWIFI");
-    const [password, setPassword] = useState("ESIT1234");
-    const [ipAddress, setIpAddress] = useState("192.168.137.116");
+    const [ssid, setSsid] = useState("MOCKWIFI");
+    const [password, setPassword] = useState("MOCK1234");
+    const [ipAddress, setIpAddress] = useState("192.168.1.100");
     const [port, setPort] = useState("23");
     const [ipModalVisible, setIpModalVisible] = useState(false);
 
@@ -1006,7 +1006,7 @@ export default function SettingsScreen() {
                             value={ipAddress}
                             onChangeText={setIpAddress}
                             keyboardType="numeric"
-                            placeholder="192.168.137.116"
+                            placeholder="192.168.1.100"
                         />
 
                         <Text style={{ fontSize: 12, color: '#666', marginBottom: 2, marginTop: 10 }}>Port (Varsayılan: 502):</Text>

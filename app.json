@@ -10,7 +10,7 @@
     "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.esitelektronik.loadcellapp",
+      "bundleIdentifier": "com.mockcompany.loadcellapp",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Uygulamanın Bluetooth terazileri bulup bağlanabilmesi için izne ihtiyacı var.",
         "NSBluetoothPeripheralUsageDescription": "Uygulamanın Bluetooth terazileri bulup bağlanabilmesi için izne ihtiyacı var.",
@@ -67,6 +67,6 @@
         "projectId": "34b4581c-59cd-43a8-a285-d1db286c4386"
       }
     },
-    "owner": "samettelci"
+    "owner": "mockowner"
   }
 }

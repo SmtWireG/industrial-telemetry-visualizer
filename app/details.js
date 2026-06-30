@@ -19,7 +19,7 @@ export default function WeightScreen() {
   const [isStable, setIsStable] = useState(false);
   const [hasTare, setHasTare] = useState(false);
   const [isOverload, setIsOverload] = useState(false);
-  const [ipAddress, setIpAddress] = useState(ip || "192.168.137.182");
+  const [ipAddress, setIpAddress] = useState(ip || "192.168.1.100");
   const [port, setPort] = useState(routePort || "23");
   const [ipModalVisible, setIpModalVisible] = useState(false);
   const [dot, setDot] = useState(0);
@@ -410,7 +410,7 @@ export default function WeightScreen() {
                   value={ipAddress}
                   onChangeText={setIpAddress}
                   keyboardType="numeric"
-                  placeholder="192.168.137.116"
+                  placeholder="192.168.1.100"
                 />
               </View>
 
